@@ -737,25 +737,45 @@
       };
 
       const handleStartImpersonation = async (comp) => {
-        alert("Acesso de suporte interempresa temporariamente desabilitado até implementação de autorização no servidor."); return;
+        const session = supportSessions[comp.company_id];
+        if (!isSuperAdmin || !session?.id || new Date(session.expires_at).getTime() <= Date.now()) {
+          setSupportError('É necessária uma sessão de suporte válida.'); return;
+        }
         try {
-          await supabaseClient.from('app_users').update({ active_support_by: currentUser.username }).eq('company_id', comp.company_id);
+          const result = await supportCall('support_status', { company_id: comp.company_id });
+          if (!result.session || result.session.id !== session.id || result.session.master_user_id !== (await supabaseClient.auth.getUser()).data.user?.id) {
+            throw new Error('A sessão expirou ou foi revogada.');
+          }
           setImpersonatedCompany(comp);
-          setAbaAtiva('painel');
-          setMobileMenuOpen(false);
-        } catch (err) {}
+          setProdutos([]); setLancamentos([]); setHistoricoFechamentos([]);
+          setAbaAtiva('painel'); setMobileMenuOpen(false);
+        } catch(err) { setSupportError(err.message || 'Não foi possível iniciar suporte.'); }
       };
 
       const handleStopImpersonation = async () => {
-        if (impersonatedCompany) {
-          try {
-            await supabaseClient.from('app_users').update({ active_support_by: null }).eq('company_id', impersonatedCompany.company_id);
-          } catch (err) {}
-        }
         setImpersonatedCompany(null);
-        setAbaAtiva('configuracoes');
-        setSubAbaConfig('empresas');
+        setProdutos([]); setLancamentos([]); setHistoricoFechamentos([]);
+        setAbaAtiva('configuracoes'); setSubAbaConfig('empresas');
       };
+
+      // Checa revogação e vencimento enquanto o suporte está aberto.
+      useEffect(() => {
+        if (!impersonatedCompany) return;
+        let cancelled = false;
+        const verify = async () => {
+          try {
+            const result = await supportCall('support_status', { company_id: impersonatedCompany.company_id });
+            const expected = supportSessions[impersonatedCompany.company_id];
+            if (!cancelled && (!result.session || !expected || result.session.id !== expected.id || new Date(result.session.expires_at).getTime() <= Date.now())) {
+              setImpersonatedCompany(null); setProdutos([]); setLancamentos([]); setHistoricoFechamentos([]);
+              setAbaAtiva('configuracoes'); setSubAbaConfig('empresas');
+              alert('Sessão de suporte encerrada ou revogada.');
+            }
+          } catch(err) { if (!cancelled) { setImpersonatedCompany(null); setProdutos([]); setLancamentos([]); setAbaAtiva('configuracoes'); setSubAbaConfig('empresas'); } }
+        };
+        verify(); const timer = setInterval(verify, 10000);
+        return () => { cancelled=true; clearInterval(timer); };
+      }, [impersonatedCompany?.company_id, supportSessions[impersonatedCompany?.company_id]?.id]);
 
       // Cálculos Financeiros
       const lancamentosAtivos = useMemo(() => lancamentos.filter(l => l.status === 'ativo' || l.status === null), [lancamentos]);
@@ -1277,7 +1297,7 @@
           const result = await supportCall('redeem_support_key', { company_id: companyId, key });
           setSupportKeyInputs(prev => ({ ...prev, [companyId]: '' }));
           setSupportSessions(prev => ({ ...prev, [companyId]: result.session }));
-          alert('Sessão de suporte autorizada. O acesso aos dados ainda depende das políticas RLS e da auditoria de operações no servidor.');
+          setSupportError('Sessão autorizada. Clique em Entrar no painel para iniciar o suporte.');
         } catch (err) { setSupportError(err.message); }
         finally { setSupportBusy(false); }
       };
@@ -2599,13 +2619,14 @@
                               <button onClick={() => handleToggleCompanyStatus(comp.company_id, comp.status)} disabled={masterSaving || comp.company_id === 'foodstrick-master'} className="bg-zinc-800 text-zinc-300 px-3 py-1.5 rounded-lg text-xs font-medium">{comp.status === 'ativo' ? 'Suspender' : 'Reativar'}</button>
                             </div>
                             {supportSelectedCompany === comp.company_id && <div className="w-full sm:basis-full border-t border-[#333] pt-3 space-y-2">
-                              <p className="text-xs text-zinc-400">Solicite ao restaurante uma chave de suporte. O código só autoriza uma sessão; as operações de edição exigem permissões auditadas no servidor.</p>
+                              <p className="text-xs text-zinc-400">Solicite ao restaurante uma chave de suporte. A sessão permite acesso temporário, sujeito às permissões e à auditoria no Supabase.</p>
                               {supportError && <p role="alert" className="text-xs text-red-300">{supportError}</p>}
                               {supportSessions[comp.company_id] && <p className="text-xs text-emerald-300">Sessão registrada até {new Date(supportSessions[comp.company_id].expires_at).toLocaleString('pt-BR')}</p>}
                               <div className="flex flex-wrap gap-2">
                                 <input type="text" autoComplete="off" placeholder="Chave FS-..." value={supportKeyInputs[comp.company_id] || ''} onChange={e => setSupportKeyInputs(prev => ({...prev, [comp.company_id]: e.target.value}))} className="flex-1 min-w-[180px] bg-[#151515] border border-[#444] rounded-lg px-3 py-2 text-xs text-white" />
                                 <button type="button" disabled={supportBusy} onClick={() => supportRedeem(comp.company_id)} className="bg-[#D95B1E] disabled:opacity-50 text-white px-3 py-2 rounded-lg text-xs font-bold">Validar chave</button>
                                 <button type="button" disabled={supportBusy} onClick={() => supportRefresh(comp.company_id)} className="border border-[#444] text-white px-3 py-2 rounded-lg text-xs">Status</button>
+                                {supportSessions[comp.company_id] && new Date(supportSessions[comp.company_id].expires_at).getTime() > Date.now() && <button type="button" disabled={supportBusy} onClick={() => handleStartImpersonation(comp)} className="bg-emerald-700 text-white px-3 py-2 rounded-lg text-xs font-bold">Entrar no painel</button>}
                                 {supportSessions[comp.company_id] && <button type="button" disabled={supportBusy} onClick={() => supportEnd(comp.company_id)} className="border border-red-700 text-red-300 px-3 py-2 rounded-lg text-xs">Encerrar sessão</button>}
                               </div>
                             </div>}
