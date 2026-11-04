@@ -625,6 +625,16 @@
       const [addonProductId, setAddonProductId] = useState('');
       const [addonProductSelection, setAddonProductSelection] = useState([]);
 
+      // Ingredientes removíveis: cadastro e associação por produto/empresa.
+      const [removableIngredients, setRemovableIngredients] = useState([]);
+      const [productRemovableLinks, setProductRemovableLinks] = useState([]);
+      const [removableForm, setRemovableForm] = useState({id:null,name:'',active:true});
+      const [removableBusy, setRemovableBusy] = useState(false);
+      const [removableLoading, setRemovableLoading] = useState(false);
+      const [removableError, setRemovableError] = useState('');
+      const [removableProductId, setRemovableProductId] = useState('');
+      const [removableSelection, setRemovableSelection] = useState([]);
+
       // Combo do Dia: gerenciamento isolado por empresa.
       const comboVazio = () => ({ id:null, name:'', description:'', image_url:'', price:'', mode:'disabled', manual_active:false, timezone:'America/Campo_Grande', items:[], schedules:[] });
       const [combos, setCombos] = useState([]);
@@ -1097,6 +1107,84 @@
           alert('Adicionais vinculados ao produto!');
         }catch(err){setAddonsError('Erro ao vincular adicionais: '+err.message);await carregarAdicionais();}
         finally{setAddonsBusy(false);}
+      }
+
+      async function carregarIngredientesRemoviveis(compId = effectiveCompanyId) {
+        if (!compId || compId === 'foodstrick-master') return;
+        setRemovableLoading(true); setRemovableError('');
+        try {
+          const [items, links] = await Promise.all([
+            supabaseClient.from('foodstrick_removable_ingredients').select('id,company_id,name,active').eq('company_id',compId).order('name'),
+            supabaseClient.from('foodstrick_product_removable_ingredients').select('company_id,product_id,ingredient_id').eq('company_id',compId)
+          ]);
+          if(items.error) throw items.error;
+          if(links.error) throw links.error;
+          setRemovableIngredients(items.data || []);
+          setProductRemovableLinks(links.data || []);
+          // Preserva seleção ao atualizar, inclusive depois de salvar.
+          setRemovableSelection(prev => removableProductId
+            ? (links.data || []).filter(x => x.product_id === removableProductId).map(x => x.ingredient_id)
+            : prev);
+        } catch(err) { setRemovableError('Não foi possível carregar ingredientes: '+(err.message || 'erro desconhecido')); }
+        finally { setRemovableLoading(false); }
+      }
+
+      async function salvarIngredienteRemovivel(e) {
+        e.preventDefault();
+        if (!effectiveCompanyId || effectiveCompanyId === 'foodstrick-master') return;
+        const name = removableForm.name.trim();
+        if (!name || name.length > 120) { setRemovableError('Informe um nome de até 120 caracteres.'); return; }
+        setRemovableBusy(true); setRemovableError('');
+        try {
+          const payload = {name,active:!!removableForm.active};
+          const result = removableForm.id
+            ? await supabaseClient.from('foodstrick_removable_ingredients').update(payload).eq('id',removableForm.id).eq('company_id',effectiveCompanyId)
+            : await supabaseClient.from('foodstrick_removable_ingredients').insert({...payload,company_id:effectiveCompanyId});
+          if(result.error) throw result.error;
+          setRemovableForm({id:null,name:'',active:true});
+          await carregarIngredientesRemoviveis();
+        } catch(err) { setRemovableError('Erro ao salvar ingrediente: '+err.message); }
+        finally { setRemovableBusy(false); }
+      }
+
+      async function excluirIngredienteRemovivel(item) {
+        if(!window.confirm('Excluir o ingrediente "'+item.name+'"? Ele será desvinculado dos produtos.')) return;
+        setRemovableBusy(true); setRemovableError('');
+        try {
+          const result = await supabaseClient.from('foodstrick_removable_ingredients').delete().eq('id',item.id).eq('company_id',effectiveCompanyId);
+          if(result.error) throw result.error;
+          if(removableForm.id === item.id) setRemovableForm({id:null,name:'',active:true});
+          setRemovableSelection(prev=>prev.filter(id=>id!==item.id));
+          await carregarIngredientesRemoviveis();
+        } catch(err) { setRemovableError('Erro ao excluir ingrediente: '+err.message); }
+        finally { setRemovableBusy(false); }
+      }
+
+      function selecionarProdutoIngredientes(productId) {
+        setRemovableProductId(productId);
+        setRemovableSelection(productRemovableLinks.filter(x=>x.product_id===productId).map(x=>x.ingredient_id));
+      }
+
+      async function salvarVinculosIngredientes(e) {
+        e.preventDefault();
+        if(!removableProductId || !effectiveCompanyId) return;
+        setRemovableBusy(true); setRemovableError('');
+        try {
+          const current = productRemovableLinks.filter(x=>x.product_id===removableProductId).map(x=>x.ingredient_id);
+          const toDelete = current.filter(id=>!removableSelection.includes(id));
+          const toInsert = removableSelection.filter(id=>!current.includes(id));
+          if(toDelete.length) {
+            const result = await supabaseClient.from('foodstrick_product_removable_ingredients').delete().eq('company_id',effectiveCompanyId).eq('product_id',removableProductId).in('ingredient_id',toDelete);
+            if(result.error) throw result.error;
+          }
+          if(toInsert.length) {
+            const result = await supabaseClient.from('foodstrick_product_removable_ingredients').insert(toInsert.map(ingredient_id=>({company_id:effectiveCompanyId,product_id:removableProductId,ingredient_id})));
+            if(result.error) throw result.error;
+          }
+          await carregarIngredientesRemoviveis();
+          alert('Ingredientes removíveis vinculados ao produto!');
+        } catch(err) { setRemovableError('Erro ao vincular ingredientes: '+err.message); await carregarIngredientesRemoviveis(); }
+        finally { setRemovableBusy(false); }
       }
 
       async function carregarConfiguracaoCardapio(compId) {
@@ -1622,6 +1710,7 @@
           carregarConfiguracaoCardapio(effectiveCompanyId);
           carregarCombos(effectiveCompanyId);
           carregarAdicionais(effectiveCompanyId);
+          carregarIngredientesRemoviveis(effectiveCompanyId);
         }
       }, [isAuthenticated, abaAtiva, effectiveCompanyId]);
 
@@ -2550,6 +2639,34 @@
                       <p className="text-xs text-zinc-400">Selecione um produto e marque os extras disponíveis para ele. Produtos sem extras não exibirão a pergunta no cardápio.</p>
                       <select value={addonProductId} onChange={e=>selecionarProdutoAdicionais(e.target.value)} className="w-full bg-[#252525] border border-[#444] rounded-lg p-3 text-sm text-white"><option value="">Selecione um produto</option>{produtos.map(p=><option key={p.id} value={p.id}>{p.nome}</option>)}</select>
                       {addonProductId&&<><div className="space-y-2 max-h-72 overflow-y-auto">{!addons.length?<p className="text-xs text-zinc-500">Cadastre adicionais primeiro.</p>:addons.map(a=><label key={a.id} className="flex items-center justify-between gap-3 rounded-lg border border-[#333] bg-[#252525] p-3 cursor-pointer"><span className="flex items-center gap-2 text-sm text-zinc-200"><input type="checkbox" checked={addonProductSelection.includes(a.id)} onChange={e=>setAddonProductSelection(prev=>e.target.checked?[...prev,a.id]:prev.filter(id=>id!==a.id))} className="accent-orange-600"/>{a.name}</span><span className="text-xs text-[#F28B50] whitespace-nowrap">R$ {Number(a.price).toFixed(2).replace('.',',')}</span></label>)}</div><button disabled={addonsBusy||addonsLoading} className="w-full rounded-lg bg-[#D95B1E] px-4 py-2.5 text-xs font-bold text-white disabled:opacity-50">Salvar adicionais deste produto</button></>}
+                    </form>
+                  </div>
+                </section>
+
+                {/* INGREDIENTES REMOVÍVEIS — cadastro e associação, sem alterar adicionais pagos */}
+                <section className="bg-[#161616] border border-[#D95B1E]/30 rounded-xl p-4 sm:p-6 space-y-5">
+                  <div className="flex flex-wrap justify-between items-center gap-3">
+                    <div><h2 className="text-lg font-bold text-white">Ingredientes removíveis</h2><p className="text-xs text-zinc-400 mt-1">Defina o que o cliente poderá pedir para retirar do lanche, sem desconto no preço.</p></div>
+                    <button type="button" onClick={()=>carregarIngredientesRemoviveis()} disabled={removableLoading} className="rounded-lg border border-[#444] px-3 py-2 text-xs text-white">{removableLoading?'Atualizando...':'Atualizar ingredientes'}</button>
+                  </div>
+                  {removableError && <p role="alert" className="rounded-lg border border-red-900 bg-red-950/40 p-3 text-xs text-red-300">{removableError}</p>}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                    <div className="space-y-3">
+                      <form onSubmit={salvarIngredienteRemovivel} className="space-y-3 rounded-xl border border-[#333] bg-[#1d1d1d] p-4">
+                        <h3 className="text-sm font-bold text-white">{removableForm.id?'Editar ingrediente':'Novo ingrediente removível'}</h3>
+                        <label className="block text-xs text-zinc-300">Nome do ingrediente<input required maxLength={120} value={removableForm.name} onChange={e=>setRemovableForm(v=>({...v,name:e.target.value}))} placeholder="Ex.: Cebola, tomate, molho especial" className="mt-1 w-full bg-[#252525] border border-[#444] rounded-lg p-3 text-sm text-white"/></label>
+                        <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={removableForm.active} onChange={e=>setRemovableForm(v=>({...v,active:e.target.checked}))} className="accent-orange-600"/> Disponível para remoção no cardápio</label>
+                        <div className="flex gap-2"><button disabled={removableBusy} className="rounded-lg bg-[#D95B1E] px-4 py-2.5 text-xs font-bold text-white disabled:opacity-50">{removableBusy?'Salvando...':removableForm.id?'Salvar alterações':'+ Cadastrar ingrediente'}</button>{removableForm.id&&<button type="button" onClick={()=>setRemovableForm({id:null,name:'',active:true})} className="rounded-lg border border-[#444] px-3 py-2 text-xs text-zinc-300">Cancelar</button>}</div>
+                      </form>
+                      <div className="space-y-2 max-h-80 overflow-y-auto">
+                        {removableLoading?<p className="text-xs text-zinc-400">Carregando...</p>:!removableIngredients.length?<p className="text-xs text-zinc-500">Nenhum ingrediente cadastrado.</p>:removableIngredients.map(item=><div key={item.id} className="rounded-lg border border-[#333] bg-[#202020] p-3 flex items-center justify-between gap-2"><div className="min-w-0"><p className="text-sm font-semibold text-white break-words">{item.name} {!item.active&&<span className="text-[10px] text-zinc-500">(Inativo)</span>}</p><p className="text-xs text-zinc-400 mt-1">Remoção gratuita</p></div><div className="flex gap-1 shrink-0"><button type="button" onClick={()=>setRemovableForm({id:item.id,name:item.name,active:item.active})} className="rounded-md bg-[#333] px-2 py-1.5 text-xs text-white">Editar</button><button type="button" disabled={removableBusy} onClick={()=>excluirIngredienteRemovivel(item)} className="rounded-md border border-red-900 px-2 py-1.5 text-xs text-red-300">Excluir</button></div></div>)}
+                      </div>
+                    </div>
+                    <form onSubmit={salvarVinculosIngredientes} className="rounded-xl border border-[#333] bg-[#1d1d1d] p-4 space-y-3 h-fit">
+                      <h3 className="text-sm font-bold text-white">Quais ingredientes podem ser retirados de cada produto?</h3>
+                      <p className="text-xs text-zinc-400">Marque somente ingredientes que realmente fazem parte do produto. Se não marcar nenhum, a opção de remoção não aparecerá.</p>
+                      <select value={removableProductId} onChange={e=>selecionarProdutoIngredientes(e.target.value)} className="w-full bg-[#252525] border border-[#444] rounded-lg p-3 text-sm text-white"><option value="">Selecione um produto</option>{produtos.map(p=><option key={p.id} value={p.id}>{p.nome}</option>)}</select>
+                      {removableProductId&&<><div className="space-y-2 max-h-72 overflow-y-auto">{!removableIngredients.length?<p className="text-xs text-zinc-500">Cadastre ingredientes primeiro.</p>:removableIngredients.map(item=><label key={item.id} className="flex items-center justify-between gap-3 rounded-lg border border-[#333] bg-[#252525] p-3 cursor-pointer"><span className="flex items-center gap-2 text-sm text-zinc-200"><input type="checkbox" checked={removableSelection.includes(item.id)} onChange={e=>setRemovableSelection(prev=>e.target.checked?[...prev,item.id]:prev.filter(id=>id!==item.id))} className="accent-orange-600"/>{item.name}</span><span className="text-xs text-zinc-400 whitespace-nowrap">Grátis</span></label>)}</div><button disabled={removableBusy||removableLoading} className="w-full rounded-lg bg-[#D95B1E] px-4 py-2.5 text-xs font-bold text-white disabled:opacity-50">Salvar ingredientes deste produto</button></>}
                     </form>
                   </div>
                 </section>
