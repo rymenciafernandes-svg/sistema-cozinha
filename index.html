@@ -594,6 +594,16 @@
       const [newCompanyPhone, setNewCompanyPhone] = useState('');
       const [newCompanyAdminUser, setNewCompanyAdminUser] = useState('');
       const [masterSaving, setMasterSaving] = useState(false);
+      const [masterLoading, setMasterLoading] = useState(false);
+      const [masterError, setMasterError] = useState('');
+      const [supportBusy, setSupportBusy] = useState(false);
+      const [supportError, setSupportError] = useState('');
+      const [supportKey, setSupportKey] = useState('');
+      const [supportKeyExpiry, setSupportKeyExpiry] = useState('');
+      const [supportSessions, setSupportSessions] = useState({});
+      const [supportKeyInputs, setSupportKeyInputs] = useState({});
+      const [supportSelectedCompany, setSupportSelectedCompany] = useState('');
+
 
       const avatarInputRef = useRef(null);
 
@@ -1221,10 +1231,92 @@
         setProcessandoFechamento(false);
       }
 
-      const fetchCompanies = async () => {
-        const { data } = await supabaseClient.from('companies').select('*').order('created_at', { ascending: false });
-        if (data) setCompaniesList(data);
+
+      // Suporte autorizado: somente Edge Function; nunca alterar company_id do cliente.
+      const supportCall = async (action, fields = {}) => {
+        const { data, error } = await supabaseClient.functions.invoke('foodstrick-master-admin', {
+          body: { action, ...fields }
+        });
+        if (error) throw new Error(data?.error || error.message || 'Falha ao consultar o servidor.');
+        if (!data?.success) throw new Error(data?.error || 'Operação não confirmada pelo servidor.');
+        return data;
       };
+      const supportRefresh = async (companyId = currentUser?.company_id) => {
+        if (!companyId || companyId === 'foodstrick-master') return;
+        setSupportError('');
+        try {
+          const result = await supportCall('support_status', { company_id: companyId });
+          setSupportSessions(prev => ({ ...prev, [companyId]: result.session || null }));
+        } catch (err) { setSupportError(err.message); }
+      };
+      const supportCreate = async () => {
+        if (supportBusy) return;
+        setSupportBusy(true); setSupportError(''); setSupportKey('');
+        try {
+          const result = await supportCall('create_support_key');
+          setSupportKey(result.key); setSupportKeyExpiry(result.expires_at);
+          await supportRefresh();
+        } catch (err) { setSupportError(err.message); }
+        finally { setSupportBusy(false); }
+      };
+      const supportRevoke = async () => {
+        if (!window.confirm('Revogar todas as autorizações de suporte desta empresa?')) return;
+        setSupportBusy(true); setSupportError('');
+        try {
+          await supportCall('revoke_support');
+          setSupportKey(''); setSupportKeyExpiry('');
+          await supportRefresh();
+        } catch (err) { setSupportError(err.message); }
+        finally { setSupportBusy(false); }
+      };
+      const supportRedeem = async (companyId) => {
+        const key = (supportKeyInputs[companyId] || '').trim();
+        if (!key) { setSupportError('Informe a chave enviada pelo restaurante.'); return; }
+        setSupportBusy(true); setSupportError('');
+        try {
+          const result = await supportCall('redeem_support_key', { company_id: companyId, key });
+          setSupportKeyInputs(prev => ({ ...prev, [companyId]: '' }));
+          setSupportSessions(prev => ({ ...prev, [companyId]: result.session }));
+          alert('Sessão de suporte autorizada. O acesso aos dados ainda depende das políticas RLS e da auditoria de operações no servidor.');
+        } catch (err) { setSupportError(err.message); }
+        finally { setSupportBusy(false); }
+      };
+      const supportEnd = async (companyId) => {
+        const session = supportSessions[companyId];
+        if (!session?.id) return;
+        setSupportBusy(true); setSupportError('');
+        try {
+          await supportCall('end_support_session', { session_id: session.id });
+          setSupportSessions(prev => ({ ...prev, [companyId]: null }));
+        } catch (err) { setSupportError(err.message); }
+        finally { setSupportBusy(false); }
+      };
+      useEffect(() => {
+        if (isAuthenticated && !isSuperAdmin && abaAtiva === 'configuracoes' && subAbaConfig === 'suporte') supportRefresh();
+      }, [isAuthenticated, isSuperAdmin, abaAtiva, subAbaConfig]);
+
+      const fetchCompanies = async () => {
+        if (!isSuperAdmin) return;
+        setMasterLoading(true);
+        setMasterError('');
+        try {
+          const { data, error } = await supabaseClient.from('companies')
+            .select('id,company_id,company_name,status,created_at')
+            .order('created_at', { ascending: false });
+          if (error) throw error;
+          setCompaniesList(data || []);
+        } catch (err) {
+          setMasterError('Não foi possível consultar as empresas: ' + (err.message || 'erro desconhecido'));
+        } finally {
+          setMasterLoading(false);
+        }
+      };
+
+      useEffect(() => {
+        if (isAuthenticated && isSuperAdmin && abaAtiva === 'configuracoes' && subAbaConfig === 'empresas') {
+          fetchCompanies();
+        }
+      }, [isAuthenticated, isSuperAdmin, abaAtiva, subAbaConfig]);
 
       const handleCreateCompanyB2B = async (e) => {
         e.preventDefault();
@@ -1838,6 +1930,11 @@
                 <button onClick={() => setSubAbaConfig('conta')} className={`w-full text-left px-3 py-2 rounded-md text-xs font-medium ${subAbaConfig === 'conta' ? 'bg-[#202020] text-white' : 'text-zinc-400 hover:text-white'}`}>
                   Minha Conta & Sessão
                 </button>
+                {!isSuperAdmin && (
+                  <button onClick={() => setSubAbaConfig('suporte')} className={`w-full text-left px-3 py-2 rounded-md text-xs font-medium ${subAbaConfig === 'suporte' ? 'bg-[#202020] text-[#D95B1E]' : 'text-zinc-400 hover:text-white'}`}>
+                    Suporte técnico
+                  </button>
+                )}
                 {isSuperAdmin && (
                   <button onClick={() => { setSubAbaConfig('empresas'); fetchCompanies(); }} className={`w-full text-left px-3 py-2 rounded-md text-xs font-bold flex items-center gap-2 ${subAbaConfig === 'empresas' ? 'bg-blue-950/40 text-blue-400 border border-blue-900/50' : 'text-blue-400/70 hover:text-blue-300'}`}>
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></svg>
@@ -2414,6 +2511,11 @@
                   <button onClick={() => setSubAbaConfig('conta')} className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap ${subAbaConfig === 'conta' ? 'bg-[#D95B1E] text-white' : 'bg-[#1c1c1c] text-zinc-400'}`}>
                     Minha Conta
                   </button>
+                  {!isSuperAdmin && (
+                    <button onClick={() => setSubAbaConfig('suporte')} className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap ${subAbaConfig === 'suporte' ? 'bg-[#D95B1E] text-white' : 'bg-[#1c1c1c] text-zinc-400'}`}>
+                      Suporte técnico
+                    </button>
+                  )}
                   {isSuperAdmin && (
                     <button onClick={() => { setSubAbaConfig('empresas'); fetchCompanies(); }} className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap ${subAbaConfig === 'empresas' ? 'bg-blue-600 text-white' : 'bg-[#1c1c1c] text-blue-400'}`}>
                       Gestão Cozinhas (B2B)
@@ -2446,6 +2548,21 @@
                   </div>
                 )}
 
+                {subAbaConfig === 'suporte' && !isSuperAdmin && (
+                  <section className="bg-[#161616] border border-[#303030] p-5 sm:p-7 rounded-2xl space-y-4 max-w-2xl">
+                    <h1 className="text-xl font-bold text-white">Suporte técnico FoodStrick</h1>
+                    <p className="text-xs text-zinc-400">Somente o administrador do restaurante pode gerar uma chave. Ela expira em 30 minutos, é de uso único e não revela sua senha.</p>
+                    {supportError && <p role="alert" className="text-xs text-red-300">{supportError}</p>}
+                    {supportSessions[currentUser?.company_id] && <p className="text-xs text-emerald-300">Sessão ativa até {new Date(supportSessions[currentUser.company_id].expires_at).toLocaleString('pt-BR')}.</p>}
+                    {supportKey && <div className="bg-[#222] rounded-xl border border-orange-700/40 p-4 space-y-2"><p className="text-xs text-zinc-400">Copie agora. Esta chave não será mostrada novamente.</p><p className="font-mono text-sm text-orange-300 break-all select-all">{supportKey}</p><p className="text-xs text-zinc-400">Expira em {new Date(supportKeyExpiry).toLocaleString('pt-BR')}</p><button type="button" onClick={() => navigator.clipboard.writeText(supportKey)} className="text-xs font-bold bg-[#D95B1E] px-3 py-2 rounded-lg">Copiar chave</button></div>}
+                    <div className="flex flex-wrap gap-2">
+                      <button type="button" disabled={supportBusy} onClick={supportCreate} className="bg-[#D95B1E] disabled:opacity-50 text-white font-bold px-4 py-2 rounded-lg text-xs">Gerar nova chave</button>
+                      <button type="button" disabled={supportBusy} onClick={() => supportRefresh()} className="border border-[#444] text-white px-4 py-2 rounded-lg text-xs">Consultar status</button>
+                      <button type="button" disabled={supportBusy} onClick={supportRevoke} className="border border-red-800 text-red-300 px-4 py-2 rounded-lg text-xs">Revogar suporte</button>
+                    </div>
+                  </section>
+                )}
+
                 {subAbaConfig === 'empresas' && isSuperAdmin && (
                   <div>
                     <h1 className="text-xl sm:text-2xl font-bold text-white mb-4">Gestão de Clientes (B2B)</h1>
@@ -2453,8 +2570,8 @@
                       <h2 className="text-xs font-bold text-blue-400 uppercase tracking-wider">Registar Nova Cozinha</h2>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                         <input type="text" placeholder="Nome do Cliente" value={newCompanyName} onChange={e => setNewCompanyName(e.target.value)} className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" required />
-                        <input type="text" placeholder="ID gerado automaticamente" value={newCompanySlug} disabled onChange={e => setNewCompanySlug(e.target.value)} className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" />
-                        <input type="text" placeholder="Telefone (configurar depois)" value={newCompanyPhone} disabled onChange={e => setNewCompanyPhone(e.target.value)} className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" />
+                        <input type="text" placeholder="ID gerado automaticamente" value={newCompanySlug} disabled title="O servidor gera o identificador automaticamente" className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" />
+                        <input type="text" placeholder="Telefone (configurar depois)" value={newCompanyPhone} disabled title="Não suportado pela operação de criação atual" className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" />
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                         <input type="email" placeholder="E-mail do administrador" value={newCompanyAdminUser} onChange={e => setNewCompanyAdminUser(e.target.value)} className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" required />
@@ -2464,7 +2581,12 @@
                     </form>
 
                     <div className="bg-[#161616] border border-[#262626] rounded-xl p-4">
-                      <h2 className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">Cozinhas Registadas ({companiesList.length})</h2>
+                      <div className="flex flex-wrap justify-between items-center gap-3 mb-3">
+                        <h2 className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Cozinhas Registadas ({companiesList.length})</h2>
+                        <button type="button" onClick={fetchCompanies} disabled={masterLoading || masterSaving} className="rounded-lg border border-[#444] px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">{masterLoading ? 'Atualizando...' : 'Atualizar lista'}</button>
+                      </div>
+                      {masterError && <p role="alert" className="text-xs text-red-300 bg-red-950/30 border border-red-900/50 p-3 rounded-lg mb-3">{masterError}</p>}
+                      {!masterLoading && !masterError && companiesList.length === 0 && <p className="text-xs text-zinc-400 p-3">Nenhuma empresa encontrada.</p>}
                       <div className="space-y-2">
                         {companiesList.map(comp => (
                           <div key={comp.id} className="bg-[#202020] p-3 rounded-lg border border-[#2d2d2d] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
@@ -2473,9 +2595,20 @@
                               <p className="text-[10px] text-zinc-500 font-mono">ID: {comp.company_id}</p>
                             </div>
                             <div className="flex items-center gap-2">
-                              <button onClick={() => handleStartImpersonation(comp)} className="flex-1 sm:flex-initial bg-amber-500/10 text-amber-400 border border-amber-500/30 px-3 py-1.5 rounded-lg text-xs font-bold">Aceder Painel ↗</button>
+                              <button type="button" onClick={() => { setSupportSelectedCompany(supportSelectedCompany === comp.company_id ? '' : comp.company_id); supportRefresh(comp.company_id); }} className="flex-1 sm:flex-initial bg-amber-900/20 text-amber-300 border border-amber-700/40 px-3 py-1.5 rounded-lg text-xs font-bold">Autorizar suporte</button>
                               <button onClick={() => handleToggleCompanyStatus(comp.company_id, comp.status)} disabled={masterSaving || comp.company_id === 'foodstrick-master'} className="bg-zinc-800 text-zinc-300 px-3 py-1.5 rounded-lg text-xs font-medium">{comp.status === 'ativo' ? 'Suspender' : 'Reativar'}</button>
                             </div>
+                            {supportSelectedCompany === comp.company_id && <div className="w-full sm:basis-full border-t border-[#333] pt-3 space-y-2">
+                              <p className="text-xs text-zinc-400">Solicite ao restaurante uma chave de suporte. O código só autoriza uma sessão; as operações de edição exigem permissões auditadas no servidor.</p>
+                              {supportError && <p role="alert" className="text-xs text-red-300">{supportError}</p>}
+                              {supportSessions[comp.company_id] && <p className="text-xs text-emerald-300">Sessão registrada até {new Date(supportSessions[comp.company_id].expires_at).toLocaleString('pt-BR')}</p>}
+                              <div className="flex flex-wrap gap-2">
+                                <input type="text" autoComplete="off" placeholder="Chave FS-..." value={supportKeyInputs[comp.company_id] || ''} onChange={e => setSupportKeyInputs(prev => ({...prev, [comp.company_id]: e.target.value}))} className="flex-1 min-w-[180px] bg-[#151515] border border-[#444] rounded-lg px-3 py-2 text-xs text-white" />
+                                <button type="button" disabled={supportBusy} onClick={() => supportRedeem(comp.company_id)} className="bg-[#D95B1E] disabled:opacity-50 text-white px-3 py-2 rounded-lg text-xs font-bold">Validar chave</button>
+                                <button type="button" disabled={supportBusy} onClick={() => supportRefresh(comp.company_id)} className="border border-[#444] text-white px-3 py-2 rounded-lg text-xs">Status</button>
+                                {supportSessions[comp.company_id] && <button type="button" disabled={supportBusy} onClick={() => supportEnd(comp.company_id)} className="border border-red-700 text-red-300 px-3 py-2 rounded-lg text-xs">Encerrar sessão</button>}
+                              </div>
+                            </div>}
                           </div>
                         ))}
                       </div>
