@@ -611,20 +611,48 @@
       const effectiveCompanyId = impersonatedCompany ? impersonatedCompany.company_id : currentUser?.company_id;
       const effectiveCompanyName = impersonatedCompany ? impersonatedCompany.company_name : (currentUser?.unidade || 'FoodStrick');
 
-      // Verificação em segundo plano da presença de suporte
+      // Estado do suporte consultado no servidor, não no campo legado app_users.
+      const [remoteSupportTab, setRemoteSupportTab] = useState('');
       useEffect(() => {
-        if (!isAuthenticated || !currentUser || isSuperAdmin) return;
+        if (!isAuthenticated || !currentUser || isSuperAdmin || !currentUser.company_id) return;
+        let cancelled = false;
         const checkSupport = async () => {
           try {
-            const { data } = await supabaseClient.from('app_users').select('active_support_by').eq('company_id', currentUser.company_id).maybeSingle();
-            if (data && data.active_support_by) setAdminInsideNotification(data.active_support_by);
-            else setAdminInsideNotification(null);
-          } catch (err) {}
+            const { data, error } = await supabaseClient.functions.invoke('foodstrick-master-admin', {
+              body: { action: 'support_status', company_id: currentUser.company_id }
+            });
+            if (error || !data?.success) throw error || new Error(data?.error || 'Falha na consulta');
+            if (!cancelled) {
+              setAdminInsideNotification(data.session?.id ? 'FoodStrick Master' : null);
+              if (!data.session) setRemoteSupportTab('');
+            }
+          } catch (err) { console.warn('Não foi possível verificar o suporte:', err); }
         };
         checkSupport();
-        const interval = setInterval(checkSupport, 12000);
-        return () => clearInterval(interval);
-      }, [isAuthenticated, currentUser, isSuperAdmin]);
+        const interval = setInterval(checkSupport, 5000);
+        return () => { cancelled = true; clearInterval(interval); };
+      }, [isAuthenticated, currentUser?.company_id, isSuperAdmin]);
+
+      // Presença e aba atual via Supabase Realtime (indicadores, sem controle remoto).
+      useEffect(() => {
+        if (!isAuthenticated || !effectiveCompanyId || effectiveCompanyId === 'foodstrick-master') return;
+        if (!impersonatedCompany && !adminInsideNotification) return;
+        const channel = supabaseClient.channel(`fs-support-presence-${effectiveCompanyId}`);
+        channel.on('broadcast', { event: 'support-tab' }, ({ payload }) => {
+          if (!isSuperAdmin && payload?.company_id === effectiveCompanyId && typeof payload.tab === 'string') {
+            setRemoteSupportTab(payload.tab);
+          }
+        }).subscribe(status => {
+          if (status === 'SUBSCRIBED' && impersonatedCompany) {
+            channel.send({ type: 'broadcast', event: 'support-tab', payload: { company_id: effectiveCompanyId, tab: abaAtiva } });
+          }
+        });
+        if (impersonatedCompany) {
+          const timer = setInterval(() => channel.send({ type: 'broadcast', event: 'support-tab', payload: { company_id: effectiveCompanyId, tab: abaAtiva } }), 3000);
+          return () => { clearInterval(timer); supabaseClient.removeChannel(channel); };
+        }
+        return () => supabaseClient.removeChannel(channel);
+      }, [isAuthenticated, effectiveCompanyId, isSuperAdmin, !!impersonatedCompany, !!adminInsideNotification, abaAtiva]);
 
       // CARREGAMENTO RIGOROSO: Cada empresa acede unicamente aos seus dados
       useEffect(() => {
@@ -1968,6 +1996,14 @@
           {/* CONTEÚDO PRINCIPAL */}
           <main className="flex-1 bg-[#0f0f0f] p-4 sm:p-6 md:p-10 overflow-y-auto">
 
+            {!isSuperAdmin && adminInsideNotification && (
+              <div className="mb-4 sm:mb-6 p-4 bg-amber-500/10 border border-amber-500/50 rounded-xl text-sm text-amber-200" role="status">
+                <div className="font-bold">Suporte FoodStrick conectado à sua empresa</div>
+                <p className="text-xs mt-1">A equipe de suporte está atendendo sua empresa. {remoteSupportTab ? `Área atual: ${({'painel':'Painel Geral','lancamentos':'Lançamentos','produtos':'Produtos e Custos','pedidos':'Pedidos Online','cardapio':'Cardápio Online','fichas':'Fichas Técnicas','fechamento':'Fechamento Mensal','configuracoes':'Configurações'})[remoteSupportTab] || remoteSupportTab}.` : 'Aguardando atualização da área em atendimento.'}</p>
+                <button type="button" disabled={supportBusy} onClick={supportRevoke} className="mt-3 bg-red-700 hover:bg-red-600 disabled:opacity-50 text-white px-3 py-2 rounded-lg font-semibold text-xs">Revogar acesso do suporte</button>
+              </div>
+            )}
+
             {impersonatedCompany && (
               <div className="mb-4 sm:mb-6 p-3 bg-amber-500/15 border border-amber-500/40 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs text-amber-300">
                 <span><strong>[Modo Suporte Ativo]:</strong> {impersonatedCompany.company_name}</span>
@@ -2695,7 +2731,7 @@
               companyId={effectiveCompanyId}
               currentUsername={currentUser?.username}
               currentUserRole={currentUser?.role}
-              targetUsername={isSuperAdmin ? 'cozinha' : 'admin'}
+              targetUsername={'foodstrick-support'}
               isActive={isSupportSessionActive}
               supabaseClient={supabaseClient}
             />
@@ -2707,7 +2743,7 @@
               companyId={effectiveCompanyId}
               currentUsername={currentUser?.username}
               currentUserRole={currentUser?.role}
-              operatorUsername={isSuperAdmin ? 'cozinha' : currentUser?.username}
+              operatorUsername={'foodstrick-support'}
               isVisible={isSupportSessionActive}
               supabaseClient={supabaseClient}
             />
