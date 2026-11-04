@@ -563,11 +563,11 @@
       const [newCompanySlug, setNewCompanySlug] = useState('');
       const [newCompanyPhone, setNewCompanyPhone] = useState('');
       const [newCompanyAdminUser, setNewCompanyAdminUser] = useState('');
-      const [newCompanyAdminPass, setNewCompanyAdminPass] = useState('');
+      const [masterSaving, setMasterSaving] = useState(false);
 
       const avatarInputRef = useRef(null);
 
-      const isSuperAdmin = currentUser?.role === 'superadmin' || currentUser?.username === 'admin';
+      const isSuperAdmin = currentUser?.role === 'superadmin' && currentUser?.company_id === 'foodstrick-master';
       const effectiveCompanyId = impersonatedCompany ? impersonatedCompany.company_id : currentUser?.company_id;
       const effectiveCompanyName = impersonatedCompany ? impersonatedCompany.company_name : (currentUser?.unidade || 'FoodStrick');
 
@@ -1075,13 +1075,44 @@
 
       const handleCreateCompanyB2B = async (e) => {
         e.preventDefault();
-        alert('Cadastro temporariamente indisponível durante a migração de segurança. Use o fluxo administrativo autorizado no servidor.');
+        if (!isSuperAdmin || masterSaving) return;
+        const name = newCompanyName.trim();
+        const email = newCompanyAdminUser.trim().toLowerCase();
+        if (name.length < 2 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          alert('Informe o nome da empresa e um e-mail válido.'); return;
+        }
+        if (!window.confirm(`Criar a empresa "${name}" e enviar convite para ${email}?`)) return;
+        setMasterSaving(true);
+        try {
+          const { data, error } = await supabaseClient.functions.invoke('foodstrick-master-admin', {
+            body: { action: 'create_company', company_name: name, admin_email: email }
+          });
+          if (error) throw new Error(data?.error || error.message || 'Falha ao chamar o servidor.');
+          if (!data?.success) throw new Error(data?.error || 'O servidor não confirmou o cadastro.');
+          alert(`Empresa cadastrada! Convite solicitado para ${email}. Verifique também o painel de usuários do Supabase.`);
+          setNewCompanyName(''); setNewCompanySlug(''); setNewCompanyPhone(''); setNewCompanyAdminUser('');
+          await fetchCompanies();
+        } catch (err) {
+          alert('Não foi possível concluir o cadastro: ' + (err.message || 'Erro desconhecido') + '\nVerifique os registros antes de tentar novamente.');
+        } finally { setMasterSaving(false); }
       };
 
-      const handleToggleCompanyStatus = async (id, currentStatus) => {
-        alert("Alteração de status indisponível até autorização no servidor."); return;
-        await supabaseClient.from('companies').update({ status: currentStatus === 'ativo' ? 'bloqueado' : 'ativo' }).eq('id', id);
-        fetchCompanies();
+      const handleToggleCompanyStatus = async (companyId, currentStatus) => {
+        if (!isSuperAdmin || masterSaving || companyId === 'foodstrick-master') return;
+        const nextStatus = currentStatus === 'ativo' ? 'suspenso' : 'ativo';
+        if (!window.confirm(`${nextStatus === 'ativo' ? 'Reativar' : 'Suspender'} esta empresa?`)) return;
+        setMasterSaving(true);
+        try {
+          const { data, error } = await supabaseClient.functions.invoke('foodstrick-master-admin', {
+            body: { action: 'set_company_status', company_id: companyId, status: nextStatus }
+          });
+          if (error) throw new Error(data?.error || error.message || 'Falha ao chamar o servidor.');
+          if (!data?.success) throw new Error(data?.error || 'O servidor não confirmou a alteração.');
+          await fetchCompanies();
+          alert('Status da empresa atualizado.');
+        } catch (err) {
+          alert('Erro ao alterar status: ' + (err.message || 'Erro desconhecido'));
+        } finally { setMasterSaving(false); }
       };
 
       const handleAvatarUpload = (e) => {
@@ -2176,14 +2207,14 @@
                       <h2 className="text-xs font-bold text-blue-400 uppercase tracking-wider">Registar Nova Cozinha</h2>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                         <input type="text" placeholder="Nome do Cliente" value={newCompanyName} onChange={e => setNewCompanyName(e.target.value)} className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" required />
-                        <input type="text" placeholder="ID Interno" value={newCompanySlug} onChange={e => setNewCompanySlug(e.target.value)} className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" />
-                        <input type="text" placeholder="WhatsApp / Telefone" value={newCompanyPhone} onChange={e => setNewCompanyPhone(e.target.value)} className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" />
+                        <input type="text" placeholder="ID gerado automaticamente" value={newCompanySlug} disabled onChange={e => setNewCompanySlug(e.target.value)} className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" />
+                        <input type="text" placeholder="Telefone (configurar depois)" value={newCompanyPhone} disabled onChange={e => setNewCompanyPhone(e.target.value)} className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" />
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                        <input type="text" placeholder="Login" value={newCompanyAdminUser} onChange={e => setNewCompanyAdminUser(e.target.value)} className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" required />
-                        <input type="password" placeholder="Palavra-passe" value={newCompanyAdminPass} onChange={e => setNewCompanyAdminPass(e.target.value)} className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" required />
+                        <input type="email" placeholder="E-mail do administrador" value={newCompanyAdminUser} onChange={e => setNewCompanyAdminUser(e.target.value)} className="bg-[#202020] border border-[#333] rounded-lg p-2.5 text-base md:text-xs text-white outline-none" required />
+                        <p className="text-xs text-zinc-400 self-center">O administrador receberá um convite para configurar a senha.</p>
                       </div>
-                      <button type="submit" className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 rounded-lg text-xs">Ativar Cozinha</button>
+                      <button type="submit" disabled={masterSaving} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold py-2.5 rounded-lg text-xs">{masterSaving ? 'Processando...' : 'Criar empresa e enviar convite'}</button>
                     </form>
 
                     <div className="bg-[#161616] border border-[#262626] rounded-xl p-4">
@@ -2197,7 +2228,7 @@
                             </div>
                             <div className="flex items-center gap-2">
                               <button onClick={() => handleStartImpersonation(comp)} className="flex-1 sm:flex-initial bg-amber-500/10 text-amber-400 border border-amber-500/30 px-3 py-1.5 rounded-lg text-xs font-bold">Aceder Painel ↗</button>
-                              <button onClick={() => handleToggleCompanyStatus(comp.id, comp.status)} className="bg-zinc-800 text-zinc-300 px-3 py-1.5 rounded-lg text-xs font-medium">{comp.status === 'ativo' ? 'Suspender' : 'Reativar'}</button>
+                              <button onClick={() => handleToggleCompanyStatus(comp.company_id, comp.status)} disabled={masterSaving || comp.company_id === 'foodstrick-master'} className="bg-zinc-800 text-zinc-300 px-3 py-1.5 rounded-lg text-xs font-medium">{comp.status === 'ativo' ? 'Suspender' : 'Reativar'}</button>
                             </div>
                           </div>
                         ))}
