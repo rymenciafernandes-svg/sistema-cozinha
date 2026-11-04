@@ -401,6 +401,60 @@
       );
     }
 
+    // Visualização somente leitura dos extratos arquivados.
+    function ExtratoDetalhado({ fechamento, lancamentos, onClose }) {
+      const rel = fechamento.relatorio || {};
+      const snapshot = Array.isArray(rel.detalhes) ? rel.detalhes : null;
+      const itens = snapshot || [];
+      const vendas = itens.filter(x => x.tipo === 'Venda');
+      const despesas = itens.filter(x => x.tipo === 'Despesa');
+      const total = arr => arr.reduce((a, x) => a + (Number(x.valor_total) || 0), 0);
+      const moeda = n => (Number(n) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+      const custo = vendas.reduce((a,x) => a + (Number(x.custo_total)||0), 0);
+      const divergencia = snapshot && (Math.abs(total(vendas) - Number(rel.faturamento||0)) > .02 || Math.abs(total(despesas) - Number(rel.despesas||0)) > .02);
+      const registro = (x,i) => (
+        <div key={x.id || i} className="border-b border-[#2d2d2d] py-2.5 last:border-0">
+          <div className="flex justify-between gap-3 text-xs"><span className="text-white font-medium break-words">{x.descricao || (x.tipo === 'Venda' ? 'Venda' : 'Despesa')}</span><strong className={x.tipo === 'Despesa' ? 'text-red-400 whitespace-nowrap' : 'text-emerald-400 whitespace-nowrap'}>{moeda(x.valor_total)}</strong></div>
+          <p className="text-[10px] text-zinc-500 mt-1">{[x.data, x.quantidade ? 'Qtd. '+x.quantidade : '', x.pagamento, x.canal_categoria, x.fornecedor].filter(Boolean).join(' · ')}</p>
+        </div>
+      );
+      return (
+        <div className="fixed inset-0 z-[9000] bg-black/70 flex items-center justify-center p-3 md:static md:bg-transparent md:p-0 md:block" onMouseDown={e => { if (e.target === e.currentTarget && window.innerWidth < 768) onClose(); }}>
+          <section role="dialog" aria-modal={window.innerWidth < 768} aria-label="Extrato detalhado" className="w-full max-w-xl md:max-w-none bg-[#161616] border border-[#D95B1E]/40 rounded-2xl shadow-2xl max-h-[88vh] md:max-h-none overflow-y-auto p-4 sm:p-5">
+            <div className="flex justify-between items-start gap-3 pb-3 border-b border-[#292929]">
+              <div><h3 className="text-white font-bold text-sm">Extrato completo — {fechamento.mes_ano}</h3><p className="text-[10px] text-zinc-500 mt-1">Fechado em {fechamento.data_fechamento ? new Date(fechamento.data_fechamento).toLocaleString('pt-BR') : 'data indisponível'}</p></div>
+              <button type="button" onClick={onClose} className="text-zinc-300 hover:text-white border border-[#383838] px-2.5 py-1 rounded-lg text-xs" aria-label="Fechar extrato">Fechar ✕</button>
+            </div>
+            <div className="grid grid-cols-2 gap-2 mt-4">
+              {[['Faturamento',rel.faturamento],['Despesas',rel.despesas],['Lucro',rel.lucro],['Registros',rel.totalRegistros]].map(([titulo,valor]) => (
+                <div key={titulo} className="bg-[#202020] border border-[#303030] rounded-xl p-3"><p className="text-[10px] text-zinc-500">{titulo}</p><strong className="text-white text-sm">{titulo === 'Registros' ? (valor ?? '—') : moeda(valor)}</strong></div>
+              ))}
+            </div>
+            <div className="mt-4 text-xs space-y-2">
+              <div className="flex justify-between text-zinc-300"><span>Volume registrado</span><span>{Number(rel.totalPratos||0)} pratos / {Number(rel.totalBebidas||0)} bebidas</span></div>
+              <div className="flex justify-between text-zinc-300"><span>Margem sobre faturamento</span><span>{Number(rel.faturamento) ? ((Number(rel.lucro||0)/Number(rel.faturamento))*100).toFixed(1)+'%' : '—'}</span></div>
+              {snapshot && <div className="flex justify-between text-zinc-300"><span>Custos dos produtos</span><span>{moeda(custo)}</span></div>}
+            </div>
+            {!snapshot ? (
+              <div className="mt-4 p-3 rounded-xl border border-amber-800/50 bg-amber-950/20 text-amber-200 text-xs leading-relaxed">Este fechamento antigo contém somente o resumo salvo. O histórico individual não foi armazenado no relatório original; por segurança, não vamos atribuir lançamentos a esse mês sem comprovação. Os próximos fechamentos terão os detalhes preservados automaticamente.</div>
+            ) : (
+              <>
+                <div className="mt-4 rounded-lg border border-[#303030] p-3 text-xs">
+                  <strong className="text-white">Conferência dos valores</strong>
+                  <p className={divergencia ? 'text-amber-400 mt-1' : 'text-emerald-400 mt-1'}>{divergencia ? 'Divergência entre os totais e os registros do fechamento. Verifique os lançamentos.' : 'Totais conferidos com os registros arquivados.'}</p>
+                  <p className="text-zinc-500 text-[10px] mt-1">A conferência identifica diferenças numéricas; não substitui auditoria financeira.</p>
+                </div>
+                <h4 className="text-[#D95B1E] font-bold text-xs mt-5">Vendas ({vendas.length}) — {moeda(total(vendas))}</h4>
+                <div className="mt-1">{vendas.length ? vendas.map(registro) : <p className="text-xs text-zinc-500 py-2">Nenhuma venda registrada.</p>}</div>
+                <h4 className="text-[#D95B1E] font-bold text-xs mt-5">Despesas ({despesas.length}) — {moeda(total(despesas))}</h4>
+                <div className="mt-1">{despesas.length ? despesas.map(registro) : <p className="text-xs text-zinc-500 py-2">Nenhuma despesa registrada.</p>}</div>
+              </>
+            )}
+          </section>
+        </div>
+      );
+    }
+
     function App() {
       const [currentUser, setCurrentUser] = useState(null);
       const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -466,6 +520,7 @@
 
       const [historicoFechamentos, setHistoricoFechamentos] = useState([]);
       const [processandoFechamento, setProcessandoFechamento] = useState(false);
+      const [extratoSelecionado, setExtratoSelecionado] = useState(null);
 
       const [modalExclusao, setModalExclusao] = useState({ aberto: false, idLancamento: null });
       const [motivoExclusao, setMotivoExclusao] = useState('Pedido cancelado');
@@ -1002,7 +1057,7 @@
         await supabaseClient.from('fechamentos').insert([{ 
           company_id: compTarget, 
           mes_ano: mesAno, 
-          relatorio: { faturamento, despesas: totalDespesas, lucro: resultadoMes, totalPratos, totalBebidas, ingredientes: arrayIngredientes, totalRegistros: lancamentosAtivos.length } 
+          relatorio: { faturamento, despesas: totalDespesas, lucro: resultadoMes, totalPratos, totalBebidas, ingredientes: arrayIngredientes, totalRegistros: lancamentosAtivos.length, detalhes: lancamentosAtivos.map(l => ({ id: l.id, data: l.data, tipo: l.tipo, descricao: l.descricao, quantidade: l.quantidade, pagamento: l.pagamento, canal_categoria: l.canal_categoria, fornecedor: l.fornecedor, valor_total: l.valor_total, custo_total: l.custo_total, resultado: l.resultado, status: l.status })) } 
         }]);
 
         const ids = lancamentosAtivos.map(l => l.id);
@@ -2032,12 +2087,14 @@
 
                 <div>
                   <h2 className="text-sm sm:text-base font-bold text-white mb-3">Extratos Anteriores</h2>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
+                    <div>
                   {historicoFechamentos.length === 0 ? (
                     <div className="bg-[#161616] border border-[#262626] rounded-xl p-5 text-center text-zinc-500 text-xs italic">Nenhum fechamento realizado até ao momento.</div>
                   ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 gap-3">
                       {historicoFechamentos.map(fech => (
-                        <div key={fech.id} className="bg-[#161616] border border-[#262626] rounded-xl p-4">
+                        <div key={fech.id} role="button" tabIndex={0} onClick={() => setExtratoSelecionado(fech)} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExtratoSelecionado(fech); } }} className="bg-[#161616] border border-[#262626] rounded-xl p-4 cursor-pointer hover:border-[#D95B1E]/50 transition-colors" title="Clique para visualizar o extrato">
                           <div className="flex justify-between items-center pb-2 border-b border-[#262626] mb-2">
                             <h3 className="font-bold text-white text-xs">Mês: {fech.mes_ano}</h3>
                             <span className="text-[10px] text-zinc-500">{new Date(fech.data_fechamento).toLocaleDateString()}</span>
@@ -2047,8 +2104,21 @@
                             <div className="flex justify-between"><span className="text-zinc-400">Despesas:</span><span className="text-red-400 font-mono">R$ {Number(fech.relatorio.despesas).toFixed(2)}</span></div>
                             <div className="flex justify-between border-t border-[#262626] pt-1 font-bold"><span className="text-zinc-300">Lucro:</span><span className="text-emerald-400 font-mono">R$ {Number(fech.relatorio.lucro).toFixed(2)}</span></div>
                           </div>
+                          <button type="button" onClick={e => { e.stopPropagation(); setExtratoSelecionado(fech); }} className="mt-3 w-full text-xs font-bold text-[#D95B1E] border border-[#D95B1E]/40 hover:bg-[#D95B1E]/10 rounded-lg py-2 transition-colors">Ver extrato completo</button>
                         </div>
                       ))}
+                    </div>
+                  )}
+                    </div>
+                    <div className="hidden md:block">
+                      {extratoSelecionado && historicoFechamentos.some(f => f.id === extratoSelecionado.id) && (
+                        <ExtratoDetalhado fechamento={extratoSelecionado} lancamentos={lancamentos} onClose={() => setExtratoSelecionado(null)} />
+                      )}
+                    </div>
+                  </div>
+                  {extratoSelecionado && historicoFechamentos.some(f => f.id === extratoSelecionado.id) && (
+                    <div className="md:hidden">
+                      <ExtratoDetalhado fechamento={extratoSelecionado} lancamentos={lancamentos} onClose={() => setExtratoSelecionado(null)} />
                     </div>
                   )}
                 </div>
