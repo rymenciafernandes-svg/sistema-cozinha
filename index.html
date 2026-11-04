@@ -569,6 +569,16 @@
       const [menuLoaded, setMenuLoaded] = useState(false);
       const [menuSettingsError, setMenuSettingsError] = useState('');
 
+
+      // Combo do Dia: gerenciamento isolado por empresa.
+      const comboVazio = () => ({ id:null, name:'', description:'', image_url:'', price:'', mode:'disabled', manual_active:false, timezone:'America/Campo_Grande', items:[], schedules:[] });
+      const [combos, setCombos] = useState([]);
+      const [comboForm, setComboForm] = useState(comboVazio);
+      const [comboBusy, setComboBusy] = useState(false);
+      const [comboLoading, setComboLoading] = useState(false);
+      const [comboError, setComboError] = useState('');
+      const [comboEditorOpen, setComboEditorOpen] = useState(false);
+
       // Pedidos recebidos pelo cardápio público
       const [pedidosOnline, setPedidosOnline] = useState([]);
       const [pedidosLoading, setPedidosLoading] = useState(false);
@@ -777,6 +787,86 @@
         });
         return Object.entries(mapa).sort((a, b) => b[1].qtd - a[1].qtd);
       }, [lancamentosAtivos, produtos]);
+
+
+      async function carregarCombos(compId = effectiveCompanyId) {
+        if (!compId || compId === 'foodstrick-master') return;
+        setComboLoading(true); setComboError('');
+        try {
+          const {data, error} = await supabaseClient.from('foodstrick_combos')
+            .select('*,foodstrick_combo_items(id,product_id,quantity),foodstrick_combo_schedules(id,weekday,start_time,end_time)')
+            .eq('company_id',compId).order('created_at',{ascending:false});
+          if (error) throw error;
+          setCombos(data || []);
+        } catch(err) { setComboError('Não foi possível carregar combos: '+(err.message||'erro desconhecido')); }
+        finally { setComboLoading(false); }
+      }
+
+      function abrirCombo(combo) {
+        setComboError('');
+        if (!combo) setComboForm(comboVazio());
+        else setComboForm({id:combo.id,name:combo.name||'',description:combo.description||'',image_url:combo.image_url||'',price:String(combo.price??''),mode:combo.mode||'disabled',manual_active:!!combo.manual_active,timezone:combo.timezone||'America/Campo_Grande',items:(combo.foodstrick_combo_items||[]).map(i=>({product_id:i.product_id,quantity:i.quantity})),schedules:(combo.foodstrick_combo_schedules||[]).map(x=>({weekday:x.weekday,start_time:String(x.start_time).slice(0,5),end_time:String(x.end_time).slice(0,5)}))});
+        setComboEditorOpen(true);
+      }
+
+      function carregarFotoCombo(e) {
+        const file=e.target.files?.[0]; if(!file)return;
+        if(!file.type.startsWith('image/')||file.size>5*1024*1024){setComboError('Escolha uma imagem de até 5 MB.');return;}
+        const reader=new FileReader();
+        reader.onload=()=>{const img=new Image();img.onload=()=>{const ratio=Math.min(1,900/Math.max(img.width,img.height));const canvas=document.createElement('canvas');canvas.width=Math.round(img.width*ratio);canvas.height=Math.round(img.height*ratio);canvas.getContext('2d').drawImage(img,0,0,canvas.width,canvas.height);setComboForm(f=>({...f,image_url:canvas.toDataURL('image/jpeg',0.75)}));};img.onerror=()=>setComboError('Imagem inválida.');img.src=reader.result;};
+        reader.onerror=()=>setComboError('Falha ao ler imagem.');reader.readAsDataURL(file);
+      }
+
+      async function salvarCombo(e) {
+        e.preventDefault(); if(comboBusy)return;
+        setComboError('');
+        const price=Number(String(comboForm.price).replace(',','.'));
+        const items=comboForm.items.filter(i=>i.product_id).map(i=>({product_id:i.product_id,quantity:Number(i.quantity)}));
+        if(!comboForm.name.trim()||!Number.isFinite(price)||price<=0){setComboError('Informe nome e preço maior que zero.');return;}
+        if(!items.length||items.some(i=>!Number.isInteger(i.quantity)||i.quantity<1)||new Set(items.map(i=>i.product_id)).size!==items.length){setComboError('Selecione produtos diferentes e quantidades inteiras positivas.');return;}
+        if(items.some(i=>!produtos.some(p=>p.id===i.product_id && (p.company_id===effectiveCompanyId || (effectiveCompanyId==='cozinha-brasileira'&&!p.company_id))))){setComboError('Há produtos que não pertencem à empresa.');return;}
+        const schedules=comboForm.schedules.map(x=>({weekday:Number(x.weekday),start_time:x.start_time,end_time:x.end_time}));
+        if(comboForm.mode==='automatic' && (!schedules.length || schedules.some(x=>!Number.isInteger(x.weekday)||x.weekday<0||x.weekday>6||!/^\d{2}:\d{2}$/.test(x.start_time)||!/^\d{2}:\d{2}$/.test(x.end_time)||x.start_time>=x.end_time))){setComboError('Configure ao menos um horário válido (início anterior ao fim).');return;}
+        setComboBusy(true);
+        try {
+          const payload={company_id:effectiveCompanyId,name:comboForm.name.trim(),description:comboForm.description.trim(),image_url:comboForm.image_url||null,price,mode:comboForm.mode,manual_active:comboForm.mode==='manual'?!!comboForm.manual_active:false,timezone:comboForm.timezone};
+          let id=comboForm.id;
+          if(id){
+            const {data,error}=await supabaseClient.from('foodstrick_combos').update(payload).eq('id',id).eq('company_id',effectiveCompanyId).select('id').single();
+            if(error)throw error; id=data.id;
+          } else {
+            // Cria desativado; ativa somente depois de salvar composição e horários.
+            const {data,error}=await supabaseClient.from('foodstrick_combos').insert({...payload,mode:'disabled',manual_active:false}).select('id').single();
+            if(error)throw error; id=data.id;
+          }
+          // Atualização da composição em duas etapas; se falhar, informa para revisão.
+          const delItems=await supabaseClient.from('foodstrick_combo_items').delete().eq('combo_id',id);
+          if(delItems.error)throw delItems.error;
+          const addItems=await supabaseClient.from('foodstrick_combo_items').insert(items.map(x=>({...x,combo_id:id})));
+          if(addItems.error)throw addItems.error;
+          const delSchedules=await supabaseClient.from('foodstrick_combo_schedules').delete().eq('combo_id',id);
+          if(delSchedules.error)throw delSchedules.error;
+          if(schedules.length){const addSchedules=await supabaseClient.from('foodstrick_combo_schedules').insert(schedules.map(x=>({...x,combo_id:id})));if(addSchedules.error)throw addSchedules.error;}
+          const activated=await supabaseClient.from('foodstrick_combos').update({mode:payload.mode,manual_active:payload.manual_active}).eq('id',id).eq('company_id',effectiveCompanyId);
+          if(activated.error)throw activated.error;
+          setComboEditorOpen(false);setComboForm(comboVazio());await carregarCombos();
+        } catch(err){setComboError('Não foi possível concluir: '+(err.message||'erro desconhecido')+'. Confira o combo antes de tentar novamente.');await carregarCombos();}
+        finally{setComboBusy(false);}
+      }
+
+      async function excluirCombo(combo) {
+        if(!window.confirm('Excluir definitivamente o combo "'+combo.name+'"?'))return;
+        setComboBusy(true);setComboError('');
+        try {
+          // Desativa primeiro para não manter oferta incompleta no cardápio.
+          const off=await supabaseClient.from('foodstrick_combos').update({mode:'disabled',manual_active:false}).eq('id',combo.id).eq('company_id',effectiveCompanyId);
+          if(off.error)throw off.error;
+          for(const table of ['foodstrick_combo_items','foodstrick_combo_schedules']){const result=await supabaseClient.from(table).delete().eq('combo_id',combo.id);if(result.error)throw result.error;}
+          const result=await supabaseClient.from('foodstrick_combos').delete().eq('id',combo.id).eq('company_id',effectiveCompanyId);
+          if(result.error)throw result.error;
+          await carregarCombos();
+        }catch(err){setComboError('Erro ao excluir: '+err.message);await carregarCombos();}finally{setComboBusy(false);}
+      }
 
       async function carregarConfiguracaoCardapio(compId) {
         if (!compId) return;
@@ -1217,6 +1307,7 @@
       useEffect(() => {
         if (isAuthenticated && abaAtiva === 'cardapio' && effectiveCompanyId && effectiveCompanyId !== 'foodstrick-master') {
           carregarConfiguracaoCardapio(effectiveCompanyId);
+          carregarCombos(effectiveCompanyId);
         }
       }, [isAuthenticated, abaAtiva, effectiveCompanyId]);
 
@@ -2059,6 +2150,40 @@
                   <div><h1 className="text-xl sm:text-2xl font-bold text-white">Cardápio Online</h1><p className="text-xs text-zinc-400 mt-1">Gerencie o que seus clientes veem no cardápio público.</p></div>
                   <a href={`cardapio.html?slug=${encodeURIComponent(menuSettings.menu_slug || (effectiveCompanyId === 'cozinha-brasileira' ? 'foodstrick' : effectiveCompanyId || ''))}`} target="_blank" rel="noreferrer" className="inline-flex justify-center items-center rounded-lg bg-[#D95B1E] hover:bg-[#c34e17] px-4 py-2.5 text-xs font-bold text-white">Visualizar cardápio ↗</a>
                 </header>
+
+                {/* GERENCIAMENTO DE COMBOS - sem alterar o formulário de cardápio existente */}
+                <section className="bg-[#161616] border border-[#D95B1E]/30 rounded-xl p-4 sm:p-6 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div><h2 className="text-lg font-bold text-white">Combo do Dia</h2><p className="text-xs text-zinc-400 mt-1">Ofertas manuais ou programadas para o cardápio público.</p></div>
+                    <div className="flex gap-2"><button type="button" onClick={()=>carregarCombos()} disabled={comboLoading} className="px-3 py-2 rounded-lg border border-[#444] text-xs text-zinc-200">Atualizar</button><button type="button" onClick={()=>abrirCombo(null)} className="px-4 py-2 rounded-lg bg-[#D95B1E] text-xs font-bold text-white">+ Novo combo</button></div>
+                  </div>
+                  {comboError && <div role="alert" className="p-3 rounded-lg bg-red-950/40 border border-red-900 text-red-300 text-xs">{comboError}</div>}
+                  {comboLoading ? <p className="text-sm text-zinc-400">Carregando combos...</p> : !combos.length ? <p className="text-sm text-zinc-500 border border-dashed border-[#383838] rounded-lg p-5">Nenhum combo cadastrado. Clique em Novo combo para começar.</p> :
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">{combos.map(c=><article key={c.id} className="rounded-xl border border-[#333] bg-[#202020] p-3 flex gap-3">
+                      {c.image_url ? <img src={c.image_url} alt="" className="w-24 h-24 object-cover rounded-lg shrink-0"/> : <div className="w-24 h-24 bg-[#292929] rounded-lg shrink-0 flex items-center justify-center text-zinc-500 text-xs">Sem foto</div>}
+                      <div className="flex-1 min-w-0"><div className="flex items-center flex-wrap gap-2"><strong className="text-sm text-white">{c.name}</strong><span className="text-[10px] px-2 py-0.5 rounded-full bg-[#303030] text-zinc-300">{c.mode==='automatic'?'Automático':c.mode==='manual'?(c.manual_active?'Manual ativo':'Manual pausado'):'Desativado'}</span></div><p className="text-xs text-zinc-400 mt-1">{(c.foodstrick_combo_items||[]).map(i=>`${i.quantity} × ${produtos.find(p=>p.id===i.product_id)?.nome||'Produto'}`).join(' + ')}</p><p className="text-[#F28B50] font-bold mt-1">R$ {Number(c.price).toFixed(2).replace('.',',')}</p><div className="flex gap-2 mt-2"><button type="button" onClick={()=>abrirCombo(c)} className="bg-[#333] text-white rounded-lg px-3 py-1.5 text-xs">Editar</button><button type="button" disabled={comboBusy} onClick={()=>excluirCombo(c)} className="border border-red-900/70 text-red-300 rounded-lg px-3 py-1.5 text-xs">Excluir</button></div></div>
+                    </article>)}</div>}
+                  {comboEditorOpen && <form onSubmit={salvarCombo} className="border border-[#414141] bg-[#1b1b1b] rounded-xl p-4 space-y-4">
+                    <div className="flex items-center justify-between"><h3 className="font-bold text-white">{comboForm.id?'Editar combo':'Cadastrar combo'}</h3><button type="button" onClick={()=>{setComboEditorOpen(false);setComboError('')}} className="text-zinc-400 text-xs">Fechar ✕</button></div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <label className="text-xs text-zinc-300">Nome do combo<input required maxLength="120" value={comboForm.name} onChange={e=>setComboForm(f=>({...f,name:e.target.value}))} className="mt-1 w-full bg-[#262626] border border-[#444] rounded-lg p-3 text-white" placeholder="Combo Família"/></label>
+                      <label className="text-xs text-zinc-300">Preço especial (R$)<input required type="number" min="0.01" step="0.01" value={comboForm.price} onChange={e=>setComboForm(f=>({...f,price:e.target.value}))} className="mt-1 w-full bg-[#262626] border border-[#444] rounded-lg p-3 text-white"/></label>
+                    </div>
+                    <label className="block text-xs text-zinc-300">Descrição<textarea rows="2" value={comboForm.description} onChange={e=>setComboForm(f=>({...f,description:e.target.value}))} className="mt-1 w-full bg-[#262626] border border-[#444] rounded-lg p-3 text-white"/></label>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3"><label className="text-xs text-zinc-300">Foto do combo<input type="file" accept="image/*" onChange={carregarFotoCombo} className="mt-1 block w-full text-xs text-zinc-300"/></label><label className="text-xs text-zinc-300">Ou URL da foto<input type="url" value={comboForm.image_url.startsWith('data:')?'':comboForm.image_url} onChange={e=>setComboForm(f=>({...f,image_url:e.target.value}))} className="mt-1 w-full bg-[#262626] border border-[#444] rounded-lg p-3 text-white" placeholder="https://..."/></label></div>
+                    {comboForm.image_url && <img src={comboForm.image_url} alt="Prévia do combo" className="w-40 h-28 object-cover rounded-lg"/>}
+                    <div><div className="flex items-center justify-between mb-2"><h4 className="text-sm font-bold text-white">Produtos e quantidades</h4><button type="button" onClick={()=>setComboForm(f=>({...f,items:[...f.items,{product_id:'',quantity:1}]}))} className="text-xs text-[#F28B50]">+ Adicionar produto</button></div>
+                      {!comboForm.items.length && <p className="text-xs text-zinc-500">Adicione os itens que compõem o combo.</p>}
+                      <div className="space-y-2">{comboForm.items.map((item,i)=><div key={i} className="flex flex-wrap gap-2"><select value={item.product_id} onChange={e=>setComboForm(f=>({...f,items:f.items.map((x,j)=>j===i?{...x,product_id:e.target.value}:x)}))} className="flex-1 min-w-[150px] bg-[#262626] border border-[#444] rounded-lg p-2 text-xs text-white"><option value="">Escolha o produto</option>{produtos.filter(p=>p.company_id===effectiveCompanyId||(effectiveCompanyId==='cozinha-brasileira'&&!p.company_id)).map(p=><option key={p.id} value={p.id}>{p.nome}</option>)}</select><input aria-label="Quantidade" type="number" min="1" step="1" value={item.quantity} onChange={e=>setComboForm(f=>({...f,items:f.items.map((x,j)=>j===i?{...x,quantity:e.target.value}:x)}))} className="w-20 bg-[#262626] border border-[#444] rounded-lg p-2 text-xs text-white"/><button type="button" onClick={()=>setComboForm(f=>({...f,items:f.items.filter((_,j)=>j!==i)}))} className="text-xs text-red-300 px-2">Remover</button></div>)}</div>
+                    </div>
+                    <div className="border-t border-[#333] pt-3"><label className="block text-xs text-zinc-300">Modo de funcionamento<select value={comboForm.mode} onChange={e=>setComboForm(f=>({...f,mode:e.target.value}))} className="mt-1 block w-full bg-[#262626] border border-[#444] rounded-lg p-3 text-white"><option value="disabled">Desativado</option><option value="manual">Manual</option><option value="automatic">Automático (dias e horários)</option></select></label>
+                      {comboForm.mode==='manual' && <label className="flex items-center gap-2 mt-3 text-xs text-zinc-300"><input type="checkbox" checked={comboForm.manual_active} onChange={e=>setComboForm(f=>({...f,manual_active:e.target.checked}))} className="accent-orange-600"/> Exibir combo agora</label>}
+                      {comboForm.mode==='automatic' && <div className="space-y-3 mt-3"><p className="text-xs text-zinc-400">Horário local: America/Campo_Grande. Dia 0 = domingo.</p><button type="button" onClick={()=>setComboForm(f=>({...f,schedules:[...f.schedules,{weekday:1,start_time:'11:00',end_time:'14:00'}]}))} className="text-xs text-[#F28B50]">+ Adicionar horário</button>{comboForm.schedules.map((x,i)=><div key={i} className="flex flex-wrap gap-2"><select aria-label="Dia da semana" value={x.weekday} onChange={e=>setComboForm(f=>({...f,schedules:f.schedules.map((v,j)=>j===i?{...v,weekday:Number(e.target.value)}:v)}))} className="bg-[#262626] border border-[#444] rounded-lg p-2 text-xs text-white">{['Domingo','Segunda','Terça','Quarta','Quinta','Sexta','Sábado'].map((d,n)=><option key={n} value={n}>{d}</option>)}</select><input aria-label="Início" type="time" value={x.start_time} onChange={e=>setComboForm(f=>({...f,schedules:f.schedules.map((v,j)=>j===i?{...v,start_time:e.target.value}:v)}))} className="bg-[#262626] border border-[#444] rounded-lg p-2 text-xs text-white"/><input aria-label="Fim" type="time" value={x.end_time} onChange={e=>setComboForm(f=>({...f,schedules:f.schedules.map((v,j)=>j===i?{...v,end_time:e.target.value}:v)}))} className="bg-[#262626] border border-[#444] rounded-lg p-2 text-xs text-white"/><button type="button" onClick={()=>setComboForm(f=>({...f,schedules:f.schedules.filter((_,j)=>j!==i)}))} className="text-xs text-red-300">Remover</button></div>)}</div>}
+                    </div>
+                    <div className="flex flex-wrap gap-2"><button type="submit" disabled={comboBusy} className="bg-[#D95B1E] text-white rounded-lg px-5 py-3 text-sm font-bold disabled:opacity-50">{comboBusy?'Salvando...':'Salvar combo'}</button><button type="button" onClick={()=>setComboEditorOpen(false)} className="border border-[#444] text-zinc-300 rounded-lg px-4 py-3 text-sm">Cancelar</button></div>
+                  </form>}
+                </section>
+
                 <form onSubmit={salvarConfiguracaoCardapio} className="bg-[#161616] border border-[#262626] rounded-xl p-4 sm:p-6 space-y-4">
                   <h2 className="font-bold text-white">Aparência e funcionamento</h2>
                   {menuSettingsError && <p className="text-sm text-red-400">{menuSettingsError}</p>}
