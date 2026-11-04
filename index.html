@@ -59,6 +59,13 @@
     const SUPABASE_KEY = 'sb_publishable_EhLCuypZr6vHrSKDCrHxQg_n7BvKxBU';
     const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
+    // Captura o tipo de recuperação antes que o cliente Auth processe a URL.
+    const RECOVERY_LINK_OPENED = (() => {
+      const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+      const query = new URLSearchParams(window.location.search);
+      return hash.get('type') === 'recovery' || query.get('type') === 'recovery';
+    })();
+
     const LOGIN_BG_IMAGE = "https://images.unsplash.com/photo-1555396273-367ea4eb4db5?q=80&w=1920&auto=format&fit=crop";
 
     // ==========================================
@@ -459,14 +466,21 @@
       const [currentUser, setCurrentUser] = useState(null);
       const [isAuthenticated, setIsAuthenticated] = useState(false);
       const [authLoading, setAuthLoading] = useState(true);
+      const [authScreen, setAuthScreen] = useState(RECOVERY_LINK_OPENED ? 'reset' : 'login');
+      const [recoveryEmail, setRecoveryEmail] = useState('');
+      const [newPassword, setNewPassword] = useState('');
+      const [confirmPassword, setConfirmPassword] = useState('');
+      const [recoveryBusy, setRecoveryBusy] = useState(false);
+      const [recoveryMessage, setRecoveryMessage] = useState('');
+      const [recoveryReady, setRecoveryReady] = useState(false);
 
       useEffect(() => {
         let alive = true;
         async function loadSession() {
           try {
             const { data: { user }, error } = await supabaseClient.auth.getUser();
-            if (error) throw error;
             if (!user) { if (alive) { setCurrentUser(null); setIsAuthenticated(false); } return; }
+            if (error) throw error;
             const { data: profile, error: profileError } = await supabaseClient
               .from('foodstrick_auth_profiles').select('username,role,company_id,avatar_url')
               .eq('user_id', user.id).single();
@@ -480,7 +494,13 @@
           } finally { if (alive) setAuthLoading(false); }
         }
         loadSession();
-        const { data: { subscription } } = supabaseClient.auth.onAuthStateChange(() => {
+        const { data: { subscription } } = supabaseClient.auth.onAuthStateChange((event, session) => {
+          if (event === 'PASSWORD_RECOVERY') {
+            setAuthScreen('reset');
+            setRecoveryReady(!!session);
+            setRecoveryMessage('');
+          }
+          if (RECOVERY_LINK_OPENED && session) setRecoveryReady(true);
           // Não consultar Supabase dentro do callback para evitar bloqueios de auth.
           setTimeout(loadSession, 0);
         });
@@ -637,6 +657,49 @@
           // O observador de auth carrega o perfil autorizado.
           setPassword('');
         } catch (err) { setAuthError(err.message || 'Falha no login.'); }
+      };
+
+      const handleRequestRecovery = async (e) => {
+        e.preventDefault();
+        setRecoveryBusy(true);
+        setAuthError('');
+        setRecoveryMessage('');
+        try {
+          const { error } = await supabaseClient.auth.resetPasswordForEmail(
+            recoveryEmail.trim().toLowerCase(),
+            { redirectTo: window.location.origin + window.location.pathname }
+          );
+          if (error) throw error;
+          setRecoveryMessage('Se esse e-mail estiver cadastrado, você receberá um link para redefinir sua senha. Confira também a caixa de spam.');
+        } catch (err) {
+          setAuthError(err.message || 'Não foi possível solicitar a recuperação.');
+        } finally { setRecoveryBusy(false); }
+      };
+
+      const handleSaveNewPassword = async (e) => {
+        e.preventDefault();
+        setAuthError('');
+        setRecoveryMessage('');
+        if (newPassword.length < 8) { setAuthError('Use uma senha com pelo menos 8 caracteres.'); return; }
+        if (newPassword !== confirmPassword) { setAuthError('As senhas não coincidem.'); return; }
+        setRecoveryBusy(true);
+        try {
+          const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+          if (sessionError || !session) throw new Error('Link inválido ou expirado. Solicite outro e-mail de recuperação.');
+          const { error } = await supabaseClient.auth.updateUser({ password: newPassword });
+          if (error) throw error;
+          await supabaseClient.auth.signOut();
+          window.history.replaceState({}, document.title, window.location.pathname);
+          setNewPassword('');
+          setConfirmPassword('');
+          setRecoveryReady(false);
+          setIsAuthenticated(false);
+          setCurrentUser(null);
+          setAuthScreen('login');
+          setRecoveryMessage('Senha alterada com sucesso! Entre com seu e-mail e a nova senha.');
+        } catch (err) {
+          setAuthError(err.message || 'Não foi possível atualizar sua senha.');
+        } finally { setRecoveryBusy(false); }
       };
 
       const handleLogout = async () => {
@@ -1269,8 +1332,8 @@
       // ==========================
       // TELA DE LOGIN
       // ==========================
-      if (authLoading) return <div className="min-h-screen flex items-center justify-center text-white">Validando sessão...</div>;
-      if (!isAuthenticated) {
+      if (authLoading && authScreen !== 'reset') return <div className="min-h-screen flex items-center justify-center text-white">Validando sessão...</div>;
+      if (!isAuthenticated || authScreen === 'reset' || authScreen === 'forgot') {
         return (
           <div className="min-h-screen w-full flex items-center justify-center md:justify-start p-4 sm:p-6 md:p-16 lg:p-24 relative bg-cover bg-center" style={{ backgroundImage: `url("${LOGIN_BG_IMAGE}")` }}>
             <div className="absolute inset-0 bg-black/75 backdrop-blur-sm" />
@@ -1285,7 +1348,34 @@
                 </div>
               </div>
               {authError && <div className="mb-4 p-3 bg-red-950/60 border border-red-800 text-red-300 rounded-lg text-xs font-medium text-center">{authError}</div>}
-              <form onSubmit={handleLogin} className="space-y-4">
+              {recoveryMessage && <div role="status" className="mb-4 p-3 bg-emerald-950/50 border border-emerald-800 text-emerald-300 rounded-lg text-xs leading-relaxed">{recoveryMessage}</div>}
+              {authScreen === 'forgot' ? (
+                <form onSubmit={handleRequestRecovery} className="space-y-4">
+                  <h2 className="font-bold text-base">Recuperar senha</h2>
+                  <p className="text-xs text-zinc-400">Informe seu e-mail para receber um link de recuperação.</p>
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-400 mb-1">E-mail cadastrado</label>
+                    <input type="email" autoComplete="email" placeholder="seu@email.com" value={recoveryEmail} onChange={e => setRecoveryEmail(e.target.value)} className="w-full bg-[#202020] text-white text-sm px-4 py-3 rounded-lg border border-[#333] focus:border-[#D95B1E] outline-none" required />
+                  </div>
+                  <button type="submit" disabled={recoveryBusy} className="w-full btn-orange font-bold py-3 rounded-lg text-sm disabled:opacity-60">{recoveryBusy ? 'Enviando...' : 'Enviar link de recuperação'}</button>
+                  <button type="button" onClick={() => { setAuthScreen('login'); setAuthError(''); setRecoveryMessage(''); }} className="w-full text-sm text-zinc-400 hover:text-white py-2">Voltar ao login</button>
+                </form>
+              ) : authScreen === 'reset' ? (
+                <form onSubmit={handleSaveNewPassword} className="space-y-4">
+                  <h2 className="font-bold text-base">Definir nova senha</h2>
+                  <p className="text-xs text-zinc-400">{recoveryReady ? 'Crie uma nova senha para sua conta.' : 'Validando link de recuperação... Se não validar, solicite outro link.'}</p>
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-400 mb-1">Nova senha</label>
+                    <input type="password" autoComplete="new-password" minLength="8" value={newPassword} onChange={e => setNewPassword(e.target.value)} className="w-full bg-[#202020] text-white text-sm px-4 py-3 rounded-lg border border-[#333] focus:border-[#D95B1E] outline-none" required />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-400 mb-1">Confirmar nova senha</label>
+                    <input type="password" autoComplete="new-password" minLength="8" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} className="w-full bg-[#202020] text-white text-sm px-4 py-3 rounded-lg border border-[#333] focus:border-[#D95B1E] outline-none" required />
+                  </div>
+                  <button type="submit" disabled={recoveryBusy || !recoveryReady} className="w-full btn-orange font-bold py-3 rounded-lg text-sm disabled:opacity-60">{recoveryBusy ? 'Salvando...' : 'Salvar nova senha'}</button>
+                  <button type="button" onClick={() => { setAuthScreen('forgot'); setAuthError(''); setRecoveryMessage(''); }} className="w-full text-sm text-zinc-400 hover:text-white py-2">Solicitar outro link</button>
+                </form>
+              ) : <form onSubmit={handleLogin} className="space-y-4">
                 <div>
                   <label className="block text-xs font-medium text-zinc-400 mb-1">E-mail</label>
                   <input type="email" autoComplete="email" placeholder="seu@email.com" value={username} onChange={(e) => setUsername(e.target.value)} className="w-full bg-[#202020] text-white text-base md:text-sm px-4 py-3 md:py-2.5 rounded-lg border border-[#333] focus:border-[#D95B1E] outline-none" required />
@@ -1302,6 +1392,7 @@
                   </button>
                 </div>
                 <button type="submit" className="w-full btn-orange font-bold py-3.5 md:py-3 rounded-lg text-sm tracking-wide shadow-lg transition-all mt-2 active:scale-95">Acessar Sistema</button>
+                <button type="button" onClick={() => { setRecoveryEmail(username); setAuthScreen('forgot'); setAuthError(''); setRecoveryMessage(''); }} className="w-full text-center text-xs text-[#f28a54] hover:text-white py-2">Esqueci minha senha</button>
               </form>
             </div>
           </div>
