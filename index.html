@@ -615,6 +615,16 @@
       const [menuSettingsError, setMenuSettingsError] = useState('');
 
 
+      // Adicionais do cardápio: catálogo e vínculos por produto, isolados por empresa.
+      const [addons, setAddons] = useState([]);
+      const [productAddonLinks, setProductAddonLinks] = useState([]);
+      const [addonForm, setAddonForm] = useState({ id:null, name:'', price:'', max_quantity:1, active:true });
+      const [addonsBusy, setAddonsBusy] = useState(false);
+      const [addonsLoading, setAddonsLoading] = useState(false);
+      const [addonsError, setAddonsError] = useState('');
+      const [addonProductId, setAddonProductId] = useState('');
+      const [addonProductSelection, setAddonProductSelection] = useState([]);
+
       // Combo do Dia: gerenciamento isolado por empresa.
       const comboVazio = () => ({ id:null, name:'', description:'', image_url:'', price:'', mode:'disabled', manual_active:false, timezone:'America/Campo_Grande', items:[], schedules:[] });
       const [combos, setCombos] = useState([]);
@@ -1012,6 +1022,81 @@
           if(result.error)throw result.error;
           await carregarCombos();
         }catch(err){setComboError('Erro ao excluir: '+err.message);await carregarCombos();}finally{setComboBusy(false);}
+      }
+
+      async function carregarAdicionais(compId = effectiveCompanyId) {
+        if (!compId || compId === 'foodstrick-master') return;
+        setAddonsLoading(true); setAddonsError('');
+        try {
+          const [a, links] = await Promise.all([
+            supabaseClient.from('foodstrick_addons').select('id,company_id,name,price,max_quantity,active').eq('company_id',compId).order('name'),
+            supabaseClient.from('foodstrick_product_addons').select('company_id,product_id,addon_id').eq('company_id',compId)
+          ]);
+          if (a.error) throw a.error;
+          if (links.error) throw links.error;
+          setAddons(a.data || []); setProductAddonLinks(links.data || []);
+        } catch(err) { setAddonsError('Não foi possível carregar os adicionais: '+(err.message || 'erro desconhecido')); }
+        finally { setAddonsLoading(false); }
+      }
+
+      async function salvarAdicional(e) {
+        e.preventDefault();
+        if (!effectiveCompanyId || effectiveCompanyId === 'foodstrick-master') return;
+        const price = Number(String(addonForm.price).replace(',','.'));
+        const limit = Number(addonForm.max_quantity);
+        if (!addonForm.name.trim() || !Number.isFinite(price) || price < 0 || !Number.isInteger(limit) || limit < 1 || limit > 20) {
+          setAddonsError('Informe nome, preço válido e limite de 1 a 20 unidades.'); return;
+        }
+        setAddonsBusy(true);setAddonsError('');
+        try {
+          const payload = {name:addonForm.name.trim(),price,max_quantity:limit,active:!!addonForm.active};
+          const result = addonForm.id
+            ? await supabaseClient.from('foodstrick_addons').update(payload).eq('id',addonForm.id).eq('company_id',effectiveCompanyId)
+            : await supabaseClient.from('foodstrick_addons').insert({...payload,company_id:effectiveCompanyId});
+          if(result.error) throw result.error;
+          setAddonForm({id:null,name:'',price:'',max_quantity:1,active:true});
+          await carregarAdicionais();
+        } catch(err) {setAddonsError('Erro ao salvar adicional: '+err.message);}
+        finally {setAddonsBusy(false);}
+      }
+
+      async function excluirAdicional(addon) {
+        if(!window.confirm('Excluir o adicional "'+addon.name+'"? Ele será desvinculado dos produtos.'))return;
+        setAddonsBusy(true);setAddonsError('');
+        try {
+          const result=await supabaseClient.from('foodstrick_addons').delete().eq('id',addon.id).eq('company_id',effectiveCompanyId);
+          if(result.error)throw result.error;
+          if(addonForm.id===addon.id)setAddonForm({id:null,name:'',price:'',max_quantity:1,active:true});
+          setAddonProductSelection(prev=>prev.filter(id=>id!==addon.id));
+          await carregarAdicionais();
+        }catch(err){setAddonsError('Erro ao excluir: '+err.message);}finally{setAddonsBusy(false);}
+      }
+
+      function selecionarProdutoAdicionais(productId) {
+        setAddonProductId(productId);
+        setAddonProductSelection(productAddonLinks.filter(x=>x.product_id===productId).map(x=>x.addon_id));
+      }
+
+      async function salvarVinculosAdicionais(e) {
+        e.preventDefault();
+        if(!addonProductId || !effectiveCompanyId)return;
+        setAddonsBusy(true);setAddonsError('');
+        try {
+          const current=productAddonLinks.filter(x=>x.product_id===addonProductId).map(x=>x.addon_id);
+          const toDelete=current.filter(id=>!addonProductSelection.includes(id));
+          const toInsert=addonProductSelection.filter(id=>!current.includes(id));
+          if(toDelete.length){
+            const result=await supabaseClient.from('foodstrick_product_addons').delete().eq('company_id',effectiveCompanyId).eq('product_id',addonProductId).in('addon_id',toDelete);
+            if(result.error)throw result.error;
+          }
+          if(toInsert.length){
+            const result=await supabaseClient.from('foodstrick_product_addons').insert(toInsert.map(addon_id=>({company_id:effectiveCompanyId,product_id:addonProductId,addon_id})));
+            if(result.error)throw result.error;
+          }
+          await carregarAdicionais();
+          alert('Adicionais vinculados ao produto!');
+        }catch(err){setAddonsError('Erro ao vincular adicionais: '+err.message);await carregarAdicionais();}
+        finally{setAddonsBusy(false);}
       }
 
       async function carregarConfiguracaoCardapio(compId) {
@@ -1536,6 +1621,7 @@
         if (isAuthenticated && abaAtiva === 'cardapio' && effectiveCompanyId && effectiveCompanyId !== 'foodstrick-master') {
           carregarConfiguracaoCardapio(effectiveCompanyId);
           carregarCombos(effectiveCompanyId);
+          carregarAdicionais(effectiveCompanyId);
         }
       }, [isAuthenticated, abaAtiva, effectiveCompanyId]);
 
@@ -2421,6 +2507,38 @@
                   <div><h1 className="text-xl sm:text-2xl font-bold text-white">Cardápio Online</h1><p className="text-xs text-zinc-400 mt-1">Gerencie o que seus clientes veem no cardápio público.</p></div>
                   <a href={`cardapio.html?slug=${encodeURIComponent(menuSettings.menu_slug || (effectiveCompanyId === 'cozinha-brasileira' ? 'foodstrick' : effectiveCompanyId || ''))}`} target="_blank" rel="noreferrer" className="inline-flex justify-center items-center rounded-lg bg-[#D95B1E] hover:bg-[#c34e17] px-4 py-2.5 text-xs font-bold text-white">Visualizar cardápio ↗</a>
                 </header>
+
+                {/* ADICIONAIS - cadastro e associação aos produtos existentes */}
+                <section className="bg-[#161616] border border-[#D95B1E]/30 rounded-xl p-4 sm:p-6 space-y-5">
+                  <div className="flex flex-wrap justify-between items-center gap-3">
+                    <div><h2 className="text-lg font-bold text-white">Adicionais dos produtos</h2><p className="text-xs text-zinc-400 mt-1">Cadastre extras, seus preços e o limite por pedido de cada produto.</p></div>
+                    <button type="button" onClick={()=>carregarAdicionais()} disabled={addonsLoading} className="rounded-lg border border-[#444] px-3 py-2 text-xs text-white">{addonsLoading?'Atualizando...':'Atualizar adicionais'}</button>
+                  </div>
+                  {addonsError && <p role="alert" className="rounded-lg border border-red-900 bg-red-950/40 p-3 text-xs text-red-300">{addonsError}</p>}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                    <div className="space-y-3">
+                      <form onSubmit={salvarAdicional} className="space-y-3 rounded-xl border border-[#333] bg-[#1d1d1d] p-4">
+                        <h3 className="text-sm font-bold text-white">{addonForm.id?'Editar adicional':'Novo adicional'}</h3>
+                        <label className="block text-xs text-zinc-300">Nome<input required maxLength={120} value={addonForm.name} onChange={e=>setAddonForm(v=>({...v,name:e.target.value}))} placeholder="Ex.: Hambúrguer extra" className="mt-1 w-full bg-[#252525] border border-[#444] rounded-lg p-3 text-sm text-white"/></label>
+                        <div className="grid grid-cols-2 gap-3">
+                          <label className="block text-xs text-zinc-300">Preço (R$)<input required type="number" min="0" step="0.01" value={addonForm.price} onChange={e=>setAddonForm(v=>({...v,price:e.target.value}))} className="mt-1 w-full bg-[#252525] border border-[#444] rounded-lg p-3 text-sm text-white"/></label>
+                          <label className="block text-xs text-zinc-300">Máximo por item<input required type="number" min="1" max="20" step="1" value={addonForm.max_quantity} onChange={e=>setAddonForm(v=>({...v,max_quantity:e.target.value}))} className="mt-1 w-full bg-[#252525] border border-[#444] rounded-lg p-3 text-sm text-white"/></label>
+                        </div>
+                        <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={addonForm.active} onChange={e=>setAddonForm(v=>({...v,active:e.target.checked}))} className="accent-orange-600"/> Disponível para clientes</label>
+                        <div className="flex gap-2"><button disabled={addonsBusy} className="rounded-lg bg-[#D95B1E] px-4 py-2.5 text-xs font-bold text-white disabled:opacity-50">{addonsBusy?'Salvando...':addonForm.id?'Salvar alterações':'+ Cadastrar adicional'}</button>{addonForm.id&&<button type="button" onClick={()=>setAddonForm({id:null,name:'',price:'',max_quantity:1,active:true})} className="rounded-lg border border-[#444] px-3 py-2 text-xs text-zinc-300">Cancelar</button>}</div>
+                      </form>
+                      <div className="space-y-2 max-h-80 overflow-y-auto">
+                        {addonsLoading?<p className="text-xs text-zinc-400">Carregando...</p>:!addons.length?<p className="text-xs text-zinc-500">Nenhum adicional cadastrado.</p>:addons.map(a=><div key={a.id} className="rounded-lg border border-[#333] bg-[#202020] p-3 flex items-center justify-between gap-2"><div className="min-w-0"><p className="text-sm font-semibold text-white break-words">{a.name} {!a.active&&<span className="text-[10px] text-zinc-500">(Inativo)</span>}</p><p className="text-xs text-[#F28B50] mt-1">R$ {Number(a.price).toFixed(2).replace('.',',')} · até {a.max_quantity} un.</p></div><div className="flex gap-1 shrink-0"><button type="button" onClick={()=>setAddonForm({id:a.id,name:a.name,price:String(a.price),max_quantity:a.max_quantity,active:a.active})} className="rounded-md bg-[#333] px-2 py-1.5 text-xs text-white">Editar</button><button type="button" disabled={addonsBusy} onClick={()=>excluirAdicional(a)} className="rounded-md border border-red-900 px-2 py-1.5 text-xs text-red-300">Excluir</button></div></div>)}
+                      </div>
+                    </div>
+                    <form onSubmit={salvarVinculosAdicionais} className="rounded-xl border border-[#333] bg-[#1d1d1d] p-4 space-y-3 h-fit">
+                      <h3 className="text-sm font-bold text-white">Quais adicionais aparecem em cada produto?</h3>
+                      <p className="text-xs text-zinc-400">Selecione um produto e marque os extras disponíveis para ele. Produtos sem extras não exibirão a pergunta no cardápio.</p>
+                      <select value={addonProductId} onChange={e=>selecionarProdutoAdicionais(e.target.value)} className="w-full bg-[#252525] border border-[#444] rounded-lg p-3 text-sm text-white"><option value="">Selecione um produto</option>{produtos.map(p=><option key={p.id} value={p.id}>{p.nome}</option>)}</select>
+                      {addonProductId&&<><div className="space-y-2 max-h-72 overflow-y-auto">{!addons.length?<p className="text-xs text-zinc-500">Cadastre adicionais primeiro.</p>:addons.map(a=><label key={a.id} className="flex items-center justify-between gap-3 rounded-lg border border-[#333] bg-[#252525] p-3 cursor-pointer"><span className="flex items-center gap-2 text-sm text-zinc-200"><input type="checkbox" checked={addonProductSelection.includes(a.id)} onChange={e=>setAddonProductSelection(prev=>e.target.checked?[...prev,a.id]:prev.filter(id=>id!==a.id))} className="accent-orange-600"/>{a.name}</span><span className="text-xs text-[#F28B50] whitespace-nowrap">R$ {Number(a.price).toFixed(2).replace('.',',')}</span></label>)}</div><button disabled={addonsBusy||addonsLoading} className="w-full rounded-lg bg-[#D95B1E] px-4 py-2.5 text-xs font-bold text-white disabled:opacity-50">Salvar adicionais deste produto</button></>}
+                    </form>
+                  </div>
+                </section>
 
                 {/* GERENCIAMENTO DE COMBOS - sem alterar o formulário de cardápio existente */}
                 <section className="bg-[#161616] border border-[#D95B1E]/30 rounded-xl p-4 sm:p-6 space-y-4">
