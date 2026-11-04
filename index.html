@@ -200,24 +200,29 @@
       const [messages, setMessages] = useState([]);
       const [newMessage, setNewMessage] = useState('');
       const [unreadCount, setUnreadCount] = useState(0);
+      const [chatError, setChatError] = useState('');
       const messagesEndRef = useRef(null);
 
       const fetchMessages = async () => {
         if (!companyId || !operatorUsername || !supabaseClient) return;
         try {
-          const { data } = await supabaseClient
+          const { data, error } = await supabaseClient
             .from('support_messages')
             .select('*')
             .eq('company_id', companyId)
             .eq('operator_username', operatorUsername)
             .order('created_at', { ascending: true });
+          if (error) throw error;
           if (data) setMessages(data);
-        } catch (err) {}
+          setChatError('');
+        } catch (err) { setChatError('Falha ao receber mensagens: ' + (err.message || 'erro desconhecido')); }
       };
 
       useEffect(() => {
         if (!isVisible || !companyId || !operatorUsername || !supabaseClient) return;
         fetchMessages();
+        // Recupera mensagens mesmo quando o Realtime não entrega eventos por RLS.
+        const polling = setInterval(fetchMessages, 2500);
 
         const channel = supabaseClient.channel(`chat-${companyId}-${operatorUsername}`)
           .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'support_messages', filter: `operator_username=eq.${operatorUsername}` }, (payload) => {
@@ -227,7 +232,7 @@
             }
           }).subscribe();
 
-        return () => { supabaseClient.removeChannel(channel); };
+        return () => { clearInterval(polling); supabaseClient.removeChannel(channel); };
       }, [companyId, operatorUsername, isOpen, currentUsername, isVisible, supabaseClient]);
 
       useEffect(() => {
@@ -240,16 +245,19 @@
         e.preventDefault();
         const text = newMessage.trim();
         if (!text) return;
-        setNewMessage('');
+        setChatError('');
         try {
-          await supabaseClient.from('support_messages').insert([{
+          const { error } = await supabaseClient.from('support_messages').insert([{
             company_id: companyId,
             operator_username: operatorUsername,
             sender_username: currentUsername,
             sender_role: currentUserRole || 'operador',
             message: text
           }]);
-        } catch (err) {}
+          if (error) throw error;
+          setNewMessage('');
+          await fetchMessages();
+        } catch (err) { setChatError('Mensagem não enviada: ' + (err.message || 'erro desconhecido')); }
       };
 
       return (
@@ -297,6 +305,7 @@
                 <div ref={messagesEndRef} />
               </div>
 
+              {chatError && <p role="alert" className="px-3 py-2 text-xs text-red-300 bg-red-950/40">{chatError}</p>}
               <form onSubmit={handleSendMessage} className="p-3 bg-[#111111] border-t border-[#262626] flex items-center gap-2">
                 <input type="text" placeholder="Digite sua mensagem..." value={newMessage} onChange={e => setNewMessage(e.target.value)} className="flex-1 bg-[#1c1c1c] border border-[#333] rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-[#D95B1E] transition-colors placeholder:text-zinc-500" />
                 <button type="submit" className="bg-[#D95B1E] hover:bg-[#c34e17] text-white p-2 rounded-xl transition-all shadow-md disabled:opacity-40" disabled={!newMessage.trim()}>
@@ -640,7 +649,12 @@
         const channel = supabaseClient.channel(`fs-support-presence-${effectiveCompanyId}`);
         channel.on('broadcast', { event: 'support-tab' }, ({ payload }) => {
           if (!isSuperAdmin && payload?.company_id === effectiveCompanyId && typeof payload.tab === 'string') {
+            const tabsPermitidas = ['painel','lancamentos','produtos','fichas','fechamento','pedidos','cardapio','configuracoes'];
+            if (!tabsPermitidas.includes(payload.tab)) return;
             setRemoteSupportTab(payload.tab);
+            // Espelha somente a navegação, sem executar comandos ou editar registros.
+            setAbaAtiva(payload.tab);
+            setMobileMenuOpen(false);
           }
         }).subscribe(status => {
           if (status === 'SUBSCRIBED' && impersonatedCompany) {
