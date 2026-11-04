@@ -79,6 +79,10 @@
       const lastScrollEmitRef = useRef(0);
       const timeoutRef = useRef(null);
       const isReceivingScrollRef = useRef(false);
+      const scrollAnimationRef = useRef(null);
+      const scrollTargetRef = useRef(null);
+      const scrollPositionRef = useRef(0);
+      const scrollLastReceivedRef = useRef(0);
 
       useEffect(() => {
         if (!isActive || !companyId || !targetUsername || !supabaseClient) {
@@ -112,12 +116,38 @@
             }
           })
           .on('broadcast', { event: 'page-scroll' }, ({ payload }) => {
-            if (payload && payload.sender !== currentUsername) {
-              isReceivingScrollRef.current = true;
-              const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
-              window.scrollTo({ top: payload.scrollRatio * (maxScroll > 0 ? maxScroll : 1), behavior: 'smooth' });
-              setTimeout(() => { isReceivingScrollRef.current = false; }, 150);
+            // Somente o Master guia a rolagem; o restaurante acompanha.
+            if (!payload || payload.sender === currentUsername || currentUserRole === 'superadmin') return;
+            const ratio = Number(payload.scrollRatio);
+            if (!Number.isFinite(ratio)) return;
+            const main = document.querySelector('[data-fs-main-scroll]');
+            const mainScrollable = main && main.scrollHeight > main.clientHeight + 2;
+            const target = mainScrollable ? main : (document.scrollingElement || document.documentElement);
+            const maxScroll = Math.max(0, target.scrollHeight - target.clientHeight);
+            scrollPositionRef.current = Math.min(1, Math.max(0, ratio)) * maxScroll;
+            scrollLastReceivedRef.current = performance.now();
+            if (scrollTargetRef.current !== target) {
+              if (scrollAnimationRef.current !== null) cancelAnimationFrame(scrollAnimationRef.current);
+              scrollAnimationRef.current = null;
+              scrollTargetRef.current = target;
             }
+            if (scrollAnimationRef.current !== null) return;
+            isReceivingScrollRef.current = true;
+            const animate = () => {
+              const el = scrollTargetRef.current;
+              if (!el) { scrollAnimationRef.current = null; return; }
+              const delta = scrollPositionRef.current - el.scrollTop;
+              if (Math.abs(delta) < 0.7) {
+                el.scrollTop = scrollPositionRef.current;
+                scrollAnimationRef.current = null;
+                // A animação termina quando param de chegar posições.
+                if (performance.now() - scrollLastReceivedRef.current > 130) isReceivingScrollRef.current = false;
+                return;
+              }
+              el.scrollTop += delta * 0.32;
+              scrollAnimationRef.current = requestAnimationFrame(animate);
+            };
+            scrollAnimationRef.current = requestAnimationFrame(animate);
           })
           .subscribe();
 
@@ -141,28 +171,34 @@
           });
         };
 
-        const handleScroll = () => {
-          if (isReceivingScrollRef.current) return;
-          const now = Date.now();
-          if (now - lastScrollEmitRef.current > 40) {
-            lastScrollEmitRef.current = now;
-            const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
-            channel.send({
-              type: 'broadcast',
-              event: 'page-scroll',
-              payload: { scrollRatio: maxScroll > 0 ? window.scrollY / maxScroll : 0, sender: currentUsername }
-            });
-          }
+        const handleScroll = (event) => {
+          // Não retransmitir rolagem do restaurante, evitando eco e disputa.
+          if (currentUserRole !== 'superadmin' || isReceivingScrollRef.current) return;
+          const main = document.querySelector('[data-fs-main-scroll]');
+          const source = event.target;
+          const docScroll = source === document || source === document.documentElement || source === document.body;
+          if (!docScroll && source !== main) return; // Ignora chat, menus e modais.
+          const now = performance.now();
+          if (now - lastScrollEmitRef.current < 33) return;
+          lastScrollEmitRef.current = now;
+          const el = source === main ? main : (document.scrollingElement || document.documentElement);
+          const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+          channel.send({
+            type: 'broadcast',
+            event: 'page-scroll',
+            payload: { scrollRatio: maxScroll > 0 ? el.scrollTop / maxScroll : 0, sender: currentUsername }
+          });
         };
 
         window.addEventListener('mousemove', handleMouseMove);
         window.addEventListener('click', handleClick);
-        window.addEventListener('scroll', handleScroll, { passive: true });
+        document.addEventListener('scroll', handleScroll, { passive: true, capture: true });
 
         return () => {
           window.removeEventListener('mousemove', handleMouseMove);
           window.removeEventListener('click', handleClick);
-          window.removeEventListener('scroll', handleScroll);
+          document.removeEventListener('scroll', handleScroll, true);
+          if (scrollAnimationRef.current !== null) cancelAnimationFrame(scrollAnimationRef.current);
           if (timeoutRef.current) clearTimeout(timeoutRef.current);
           supabaseClient.removeChannel(channel);
         };
@@ -2046,7 +2082,7 @@
           )}
 
           {/* CONTEÚDO PRINCIPAL */}
-          <main className="flex-1 bg-[#0f0f0f] p-4 sm:p-6 md:p-10 overflow-y-auto">
+          <main data-fs-main-scroll className="flex-1 bg-[#0f0f0f] p-4 sm:p-6 md:p-10 overflow-y-auto">
 
             {!isSuperAdmin && adminInsideNotification && (
               <div className="mb-4 sm:mb-6 p-4 bg-amber-500/10 border border-amber-500/50 rounded-xl text-sm text-amber-200" role="status">
