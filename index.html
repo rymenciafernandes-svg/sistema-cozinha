@@ -123,7 +123,7 @@
 
         const handleMouseMove = (e) => {
           const now = Date.now();
-          if (now - lastEmitRef.current > 25) {
+          if (now - lastEmitRef.current > 40) {
             lastEmitRef.current = now;
             channel.send({
               type: 'broadcast',
@@ -179,7 +179,7 @@
           {clickRipples.map(ripple => (
             <span key={ripple.id} style={{ left: ripple.x - 18, top: ripple.y - 18 }} className="absolute w-9 h-9 rounded-full border-2 border-[#D95B1E] animate-ping opacity-90 pointer-events-none" />
           ))}
-          <div style={{ transform: `translate3d(${posX}px, ${posY}px, 0)`, transition: 'transform 0.04s linear' }} className="absolute top-0 left-0 flex flex-col items-start select-none">
+          <div style={{ transform: `translate3d(${posX}px, ${posY}px, 0)`, transition: 'transform 0.07s linear' }} className="absolute top-0 left-0 flex flex-col items-start select-none">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" className="drop-shadow-[0_2px_8px_rgba(0,0,0,0.8)] -translate-x-1 -translate-y-1">
               <path d="M5.65 2.15C5.1 1.6 4.25 2.05 4.3 2.85L5.75 19.35C5.8 20.05 6.7 20.35 7.2 19.85L11.5 15.5L16.2 21.8C16.5 22.2 17.1 22.3 17.5 22L20.2 20C20.6 19.7 20.7 19.1 20.4 18.7L15.7 12.4L21.4 11.2C22.1 11.05 22.3 10.15 21.75 9.75L5.65 2.15Z" fill={isSuper ? '#D95B1E' : '#10B981'} stroke="#000000" strokeWidth="1.5" />
             </svg>
@@ -642,31 +642,69 @@
         return () => { cancelled = true; clearInterval(interval); };
       }, [isAuthenticated, currentUser?.company_id, isSuperAdmin]);
 
-      // Presença e aba atual via Supabase Realtime (indicadores, sem controle remoto).
+      // Canal de navegação persistente: não recriar a conexão a cada clique.
+      const supportNavChannelRef = useRef(null);
+      const supportNavReadyRef = useRef(false);
+      const supportNavTabRef = useRef('painel');
+      const supportNavLastRef = useRef('');
+      supportNavTabRef.current = abaAtiva;
+
       useEffect(() => {
         if (!isAuthenticated || !effectiveCompanyId || effectiveCompanyId === 'foodstrick-master') return;
         if (!impersonatedCompany && !adminInsideNotification) return;
+        let alive = true;
+        let lastRemoteSeq = 0;
         const channel = supabaseClient.channel(`fs-support-presence-${effectiveCompanyId}`);
+        supportNavChannelRef.current = channel;
+        supportNavReadyRef.current = false;
+
+        const sendCurrentTab = () => {
+          if (!alive || !impersonatedCompany || !supportNavReadyRef.current) return;
+          const tab = supportNavTabRef.current;
+          channel.send({ type: 'broadcast', event: 'support-tab', payload: {
+            company_id: effectiveCompanyId, tab, seq: Date.now()
+          }}).catch(err => console.warn('Falha na sincronização da aba:', err));
+        };
+
         channel.on('broadcast', { event: 'support-tab' }, ({ payload }) => {
-          if (!isSuperAdmin && payload?.company_id === effectiveCompanyId && typeof payload.tab === 'string') {
-            const tabsPermitidas = ['painel','lancamentos','produtos','fichas','fechamento','pedidos','cardapio','configuracoes'];
-            if (!tabsPermitidas.includes(payload.tab)) return;
-            setRemoteSupportTab(payload.tab);
-            // Espelha somente a navegação, sem executar comandos ou editar registros.
-            setAbaAtiva(payload.tab);
-            setMobileMenuOpen(false);
-          }
+          if (isSuperAdmin || payload?.company_id !== effectiveCompanyId) return;
+          const tabsPermitidas = ['painel','lancamentos','produtos','fichas','fechamento','pedidos','cardapio','configuracoes'];
+          if (!tabsPermitidas.includes(payload.tab)) return;
+          const seq = Number(payload.seq) || 0;
+          if (seq && seq < lastRemoteSeq) return;
+          if (seq) lastRemoteSeq = seq;
+          setRemoteSupportTab(payload.tab);
+          setAbaAtiva(previous => previous === payload.tab ? previous : payload.tab);
+          setMobileMenuOpen(false);
         }).subscribe(status => {
-          if (status === 'SUBSCRIBED' && impersonatedCompany) {
-            channel.send({ type: 'broadcast', event: 'support-tab', payload: { company_id: effectiveCompanyId, tab: abaAtiva } });
-          }
+          if (!alive) return;
+          supportNavReadyRef.current = status === 'SUBSCRIBED';
+          if (status === 'SUBSCRIBED') sendCurrentTab();
         });
-        if (impersonatedCompany) {
-          const timer = setInterval(() => channel.send({ type: 'broadcast', event: 'support-tab', payload: { company_id: effectiveCompanyId, tab: abaAtiva } }), 3000);
-          return () => { clearInterval(timer); supabaseClient.removeChannel(channel); };
-        }
-        return () => supabaseClient.removeChannel(channel);
-      }, [isAuthenticated, effectiveCompanyId, isSuperAdmin, !!impersonatedCompany, !!adminInsideNotification, abaAtiva]);
+
+        // Heartbeat leve: recupera a aba após uma reconexão, sem recriar o canal.
+        const heartbeat = impersonatedCompany ? setInterval(sendCurrentTab, 15000) : null;
+        return () => {
+          alive = false;
+          if (heartbeat) clearInterval(heartbeat);
+          if (supportNavChannelRef.current === channel) {
+            supportNavChannelRef.current = null;
+            supportNavReadyRef.current = false;
+          }
+          supabaseClient.removeChannel(channel);
+        };
+      }, [isAuthenticated, effectiveCompanyId, isSuperAdmin, !!impersonatedCompany, !!adminInsideNotification]);
+
+      // Envia imediatamente a mudança de aba; evita broadcasts duplicados.
+      useEffect(() => {
+        if (!impersonatedCompany || !supportNavReadyRef.current || !supportNavChannelRef.current) return;
+        const key = `${effectiveCompanyId}:${abaAtiva}`;
+        if (supportNavLastRef.current === key) return;
+        supportNavLastRef.current = key;
+        supportNavChannelRef.current.send({ type: 'broadcast', event: 'support-tab', payload: {
+          company_id: effectiveCompanyId, tab: abaAtiva, seq: Date.now()
+        }}).catch(err => console.warn('Falha ao enviar aba:', err));
+      }, [abaAtiva, effectiveCompanyId, !!impersonatedCompany]);
 
       // CARREGAMENTO RIGOROSO: Cada empresa acede unicamente aos seus dados
       useEffect(() => {
