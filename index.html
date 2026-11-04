@@ -1339,13 +1339,30 @@
             if (itemsError) throw itemsError;
             items = orderItems || [];
           }
+          // Composição histórica: consulta restrita à empresa autenticada.
+          let comboDetails = [];
+          if (orderIds.length) {
+            const { data: details, error: detailsError } = await supabaseClient.rpc(
+              'foodstrick_order_combo_details', { p_order_ids: orderIds }
+            );
+            if (detailsError) {
+              console.warn('Composição de combos indisponível:', detailsError);
+            } else {
+              comboDetails = Array.isArray(details) ? details : [];
+            }
+          }
+          const combosByOrder = new Map();
+          for (const combo of comboDetails) {
+            if (!combosByOrder.has(combo.order_id)) combosByOrder.set(combo.order_id, []);
+            combosByOrder.get(combo.order_id).push(combo);
+          }
           const itemsByOrder = new Map();
           for (const item of items) {
             if (!itemsByOrder.has(item.order_id)) itemsByOrder.set(item.order_id, []);
             itemsByOrder.get(item.order_id).push(item);
           }
           setPedidosOnline((orders || []).map(order => ({
-            ...order, items: itemsByOrder.get(order.id) || []
+            ...order, items: itemsByOrder.get(order.id) || [], comboDetails: combosByOrder.get(order.id) || []
           })));
         } catch (error) {
           console.error('Erro ao carregar pedidos online:', error);
@@ -2134,11 +2151,24 @@
                 {pedidosLoading && pedidosOnline.length===0 ? <div className="rounded-xl border border-[#262626] bg-[#161616] p-10 text-center text-zinc-400">Carregando pedidos...</div> : (pedidosOnline.filter(p=>filtroPedidos==='todos'||p.status===filtroPedidos).length===0 ? <div className="rounded-xl border border-dashed border-[#333] bg-[#161616] p-10 text-center"><div className="text-zinc-500 mb-2"><svg className="mx-auto" xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M6 2h12v20l-2-1-2 1-2-1-2 1-2-1-2 1V2Z"/><path d="M9 8h6M9 12h6"/></svg></div><h2 className="font-bold text-white">Nenhum pedido nesta categoria</h2><p className="text-sm text-zinc-500 mt-1">Quando um cliente enviar um pedido pelo cardápio público, ele aparecerá aqui.</p></div> : <div className="space-y-3">{pedidosOnline.filter(p=>filtroPedidos==='todos'||p.status===filtroPedidos).map(p=>{
                   const expanded=pedidoExpandido===p.id;
                   const created=p.created_at?new Date(p.created_at).toLocaleString('pt-BR'):'Data indisponível';
+                  const detalhesPorNome = new Map();
+                  for (const combo of (p.comboDetails || [])) {
+                    const nome = String(combo.combo_name || '').trim().toLocaleLowerCase('pt-BR');
+                    if (!detalhesPorNome.has(nome)) detalhesPorNome.set(nome, []);
+                    detalhesPorNome.get(nome).push(combo);
+                  }
                   return <article key={p.id} className="rounded-xl border border-[#2b2b2b] bg-[#161616] overflow-hidden">
                     <div className="p-4 sm:p-5"><div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h2 className="font-bold text-white">Pedido #{String(p.id).slice(0,8).toUpperCase()}</h2><span className={`rounded-full border px-2 py-1 text-[10px] font-bold ${statusPedidoClass(p.status)}`}>{statusPedidoLabel(p.status)}</span></div><p className="text-xs text-zinc-500 mt-1">{created}</p><p className="text-sm text-zinc-200 mt-3 font-semibold">{p.customer_name}</p><p className="text-xs text-zinc-400 mt-1">{p.customer_phone}</p></div><div className="sm:text-right"><p className="text-xl font-black text-[#F28B50]">R$ {Number(p.total||0).toFixed(2).replace('.',',')}</p><p className="text-xs text-zinc-400 mt-1">{p.order_type==='delivery'?'Entrega':'Retirada'} · {p.payment_method||'Pagamento não informado'}</p></div></div>
                     {p.order_type==='delivery'&&p.delivery_address&&<p className="text-xs text-zinc-400 mt-3">Endereço: {p.delivery_address}</p>}{p.notes&&<p className="text-xs text-zinc-400 mt-2">Observações: {p.notes}</p>}
                     <div className="flex flex-wrap items-center gap-2 mt-4"><button onClick={()=>setPedidoExpandido(expanded?null:p.id)} className="rounded-lg border border-[#3a3a3a] bg-[#242424] px-3 py-2 text-xs font-bold text-white">{expanded?'Ocultar itens':'Ver itens'} ({(p.items||[]).length})</button><span className={`rounded-lg border px-3 py-2 text-xs font-bold ${p.payment_status==='paid'?'border-emerald-800 bg-emerald-950 text-emerald-300':'border-amber-900 bg-amber-950/40 text-amber-300'}`}>{p.payment_status==='paid'?'Pagamento recebido':'Pagamento pendente'}</span>{p.payment_status!=='paid'&&!p.financial_launch_id&&!['rejected','cancelled','canceled','recusado','cancelado'].includes(String(p.status).toLowerCase())&&<button type="button" disabled={pagamentoAtualizando===p.id||pedidoAtualizando===p.id} onClick={()=>confirmarPagamentoManual(p)} className="rounded-lg bg-[#D95B1E] hover:bg-[#c34e17] px-3 py-2 text-xs font-bold text-white disabled:opacity-50">{pagamentoAtualizando===p.id?'Confirmando...':'Confirmar recebimento'}</button>}{p.status==='pending'&&<><button disabled={pedidoAtualizando===p.id} onClick={()=>atualizarStatusPedido(p.id,'accepted')} className="rounded-lg bg-emerald-700 hover:bg-emerald-600 px-3 py-2 text-xs font-bold text-white disabled:opacity-50">Aceitar pedido</button><button disabled={pedidoAtualizando===p.id} onClick={()=>atualizarStatusPedido(p.id,'rejected')} className="rounded-lg bg-red-950 hover:bg-red-900 border border-red-900 px-3 py-2 text-xs font-bold text-red-300 disabled:opacity-50">Recusar</button></>}{p.status==='accepted'&&<button disabled={pedidoAtualizando===p.id} onClick={()=>atualizarStatusPedido(p.id,'preparing')} className="rounded-lg bg-purple-800 hover:bg-purple-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-50">Iniciar preparo</button>}{p.status==='preparing'&&<button disabled={pedidoAtualizando===p.id} onClick={()=>atualizarStatusPedido(p.id,'ready')} className="rounded-lg bg-blue-800 hover:bg-blue-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-50">Marcar como pronto</button>}{p.status==='ready'&&<button disabled={pedidoAtualizando===p.id} onClick={()=>atualizarStatusPedido(p.id,'completed')} className="rounded-lg bg-emerald-700 hover:bg-emerald-600 px-3 py-2 text-xs font-bold text-white disabled:opacity-50">Concluir pedido</button>}</div>
-                    {expanded&&<div className="mt-4 rounded-lg border border-[#2b2b2b] bg-[#1c1c1c] p-3">{!(p.items||[]).length?<p className="text-xs text-zinc-500">Itens não retornados pelo banco.</p>:<div className="space-y-2">{p.items.map((it,i)=><div key={it.id||i} className="flex justify-between gap-3 text-sm"><span className="text-zinc-300">{it.quantity} × {it.product_name}</span><span className="text-white font-semibold">R$ {Number(it.line_total||0).toFixed(2).replace('.',',')}</span></div>)}<div className="border-t border-[#333] pt-2 flex justify-between font-black"><span>Total</span><span className="text-[#F28B50]">R$ {Number(p.total||0).toFixed(2).replace('.',',')}</span></div></div>}</div>}
+                    {expanded&&<div className="mt-4 rounded-lg border border-[#2b2b2b] bg-[#1c1c1c] p-3">{!(p.items||[]).length?<p className="text-xs text-zinc-500">Itens não retornados pelo banco.</p>:<div className="space-y-2">{p.items.map((it,i)=><div key={it.id||i} className="flex justify-between gap-3 text-sm"><div className="min-w-0"><span className="text-zinc-300">{it.quantity} × {it.product_name}</span>{String(it.product_name || '').startsWith('Combo: ') && (() => {
+                      const nome = String(it.product_name).slice(7).trim().toLocaleLowerCase('pt-BR');
+                      const encontrados = detalhesPorNome.get(nome) || [];
+                      const ocorrenciasAnteriores = (p.items || []).slice(0, i).filter(anterior => String(anterior.product_name || '').trim().toLocaleLowerCase('pt-BR') === String(it.product_name || '').trim().toLocaleLowerCase('pt-BR')).length;
+                      const detalhe = encontrados[ocorrenciasAnteriores];
+                      if (!detalhe) return null;
+                      return <div className="mt-2 rounded-lg border border-[#383838] bg-[#242424] px-3 py-2"><p className="text-xs font-semibold text-[#F28B50] mb-1">Composição para preparar</p>{(detalhe.components || []).map((componente, ci) => <p key={ci} className="text-xs text-zinc-300">{Number(componente.quantity_per_combo || 0) * Number(it.quantity || 0)} × {componente.product_name}</p>)}</div>;
+                    })()}</div><span className="text-white font-semibold">R$ {Number(it.line_total||0).toFixed(2).replace('.',',')}</span></div>)}<div className="border-t border-[#333] pt-2 flex justify-between font-black"><span>Total</span><span className="text-[#F28B50]">R$ {Number(p.total||0).toFixed(2).replace('.',',')}</span></div></div>}</div>}
                     </div></article>;
                 })}</div>)}
               </div>
