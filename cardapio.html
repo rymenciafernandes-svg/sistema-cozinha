@@ -95,6 +95,21 @@ html{scroll-behavior:smooth}body{margin:0;line-height:1.5}button,input,select,te
  .price{font-size:13px}
  .qty-btn{width:27px;height:27px;min-width:27px}
 }
+
+/* FoodStrick: aproveitamento da largura apenas em telas de computador.
+   O CSS e o JavaScript existentes permanecem intactos. */
+@media (min-width: 1024px) {
+  #app {
+    max-width: none;
+    width: 100%;
+    padding-left: clamp(28px, 3.2vw, 72px);
+    padding-right: clamp(28px, 3.2vw, 72px);
+  }
+  .menu-list { gap: 18px; }
+}
+@media (min-width: 1440px) {
+  .menu-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 </style>
 </head>
 <body>
