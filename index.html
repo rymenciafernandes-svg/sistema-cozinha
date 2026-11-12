@@ -645,6 +645,78 @@
       </section>;
     }
 
+
+    // RELATÓRIOS AVANÇADOS V1 — somente leitura; não altera lançamentos.
+    function FoodStrickAnalytics({companyId, client, products}) {
+      const [records,setRecords]=React.useState([]);
+      const [busy,setBusy]=React.useState(false);
+      const [error,setError]=React.useState('');
+      const [from,setFrom]=React.useState(()=>{const d=new Date();d.setDate(d.getDate()-29);return d.toISOString().slice(0,10);});
+      const [to,setTo]=React.useState(()=>new Date().toISOString().slice(0,10));
+      const [loadedAt,setLoadedAt]=React.useState('');
+      const money=n=>(Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+      const load=React.useCallback(async()=>{
+        if(!companyId||companyId==='foodstrick-master')return;
+        if(!from||!to||from>to){setError('Confira as datas do período.');return;}
+        setBusy(true);setError('');
+        try{
+          const all=[];
+          for(let page=0;page<40;page++){
+            const {data,error:e}=await client.from('lancamentos').select('*').eq('company_id',companyId).gte('data',from).lte('data',to).order('data',{ascending:false}).range(page*500,page*500+499);
+            if(e)throw e;
+            all.push(...(data||[]));
+            if(!data||data.length<500)break;
+            if(page===39)throw new Error('O período contém mais de 20 mil registros. Reduza o intervalo para obter um relatório completo.');
+          }
+          setRecords(all);setLoadedAt(new Date().toLocaleTimeString('pt-BR'));
+        }catch(e){setError(e.message||'Falha ao carregar relatório.');setRecords([]);}
+        finally{setBusy(false);}
+      },[companyId,client,from,to]);
+      React.useEffect(()=>{setRecords([]);setLoadedAt('');},[companyId]);
+      React.useEffect(()=>{load();},[load]);
+      const stats=React.useMemo(()=>{
+        const rows=records.filter(r=>r.status!=='excluido');
+        const sales=rows.filter(r=>r.tipo==='Venda');
+        const expenses=rows.filter(r=>r.tipo==='Despesa');
+        const revenue=sales.reduce((a,r)=>a+(Number(r.valor_total)||0),0);
+        const costs=sales.reduce((a,r)=>a+(Number(r.custo_total)||0),0);
+        const expenseTotal=expenses.reduce((a,r)=>a+(Number(r.valor_total)||0),0);
+        const days={};const prods={};const hours={};
+        for(const r of sales){
+          const date=String(r.data||'').slice(0,10),value=Number(r.valor_total)||0;
+          if(date)days[date]=(days[date]||0)+value;
+          const id=String(r.produto_id||'');
+          const name=(products||[]).find(p=>String(p.id)===id)?.nome||r.descricao||'Produto não identificado';
+          const key=id||name;
+          if(!prods[key])prods[key]={name,quantity:0,revenue:0};
+          prods[key].quantity+=Number(r.quantidade)||1;prods[key].revenue+=value;
+          const raw=r.created_at;
+          if(raw&&!Number.isNaN(Date.parse(raw))){const h=new Date(raw).toLocaleString('pt-BR',{hour:'2-digit',hour12:false,timeZone:'America/Sao_Paulo'}).slice(0,2);hours[h]=(hours[h]||0)+1;}
+        }
+        return {sales,revenue,costs,expenseTotal,days,prods:Object.values(prods).sort((a,b)=>b.quantity-a.quantity),hours,profit:revenue-costs-expenseTotal};
+      },[records,products]);
+      const dayRows=Object.entries(stats.days).sort((a,b)=>a[0].localeCompare(b[0]));
+      const maxDay=Math.max(1,...dayRows.map(x=>x[1]));
+      const hourRows=Object.entries(stats.hours).sort((a,b)=>a[0].localeCompare(b[0]));
+      const maxHour=Math.max(1,...hourRows.map(x=>x[1]));
+      const exportCSV=()=>{
+        const lines=[['Data','Tipo','Descrição','Quantidade','Valor','Custo','Status'],...records.map(r=>[r.data,r.tipo,r.descricao,r.quantidade,r.valor_total,r.custo_total,r.status])];
+        const csv='\ufeff'+lines.map(line=>line.map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(';')).join('\r\n');
+        const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+        const a=document.createElement('a');a.href=url;a.download=`foodstrick_relatorio_${from}_${to}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+      };
+      const panel='bg-[#18181a] border border-[#303034] rounded-xl p-4';
+      return <div className="max-w-6xl space-y-5 pb-10">
+        <div className="flex flex-wrap items-center justify-between gap-3"><div><h1 className="text-xl sm:text-2xl font-bold text-white">Relatórios Avançados</h1><p className="text-xs text-zinc-400 mt-1">Indicadores financeiros e de vendas • Consulta somente leitura</p></div><button type="button" disabled={busy||!loadedAt} onClick={exportCSV} className="px-4 py-2.5 rounded-lg bg-[#D95B1E] text-white text-xs font-bold disabled:opacity-40">Exportar CSV</button></div>
+        <div className={panel+' flex flex-wrap items-end gap-3'}><label className="text-xs text-zinc-300">De<input type="date" value={from} onChange={e=>setFrom(e.target.value)} className="block mt-1 bg-[#222] border border-[#444] rounded-lg p-2 text-white"/></label><label className="text-xs text-zinc-300">Até<input type="date" value={to} onChange={e=>setTo(e.target.value)} className="block mt-1 bg-[#222] border border-[#444] rounded-lg p-2 text-white"/></label><button type="button" onClick={load} disabled={busy} className="bg-[#2b2b2b] border border-[#444] px-4 py-2 rounded-lg text-xs font-bold">{busy?'Carregando...':'Atualizar'}</button><span className="text-xs text-zinc-500">{loadedAt?'Atualizado às '+loadedAt:''}</span></div>
+        {error&&<p role="alert" className="text-red-300 text-xs p-3 border border-red-900 rounded-lg">{error}</p>}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">{[['Faturamento',money(stats.revenue)],['Despesas',money(stats.expenseTotal)],['Resultado estimado',money(stats.profit)],['Ticket por lançamento',money(stats.sales.length?stats.revenue/stats.sales.length:0)]].map(([label,val])=><div key={label} className={panel}><p className="text-xs text-zinc-400">{label}</p><p className="text-lg sm:text-xl font-bold text-white mt-2">{val}</p></div>)}</div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4"><section className={panel}><h2 className="font-bold text-sm mb-4">Faturamento por dia</h2><div className="space-y-2 max-h-72 overflow-y-auto">{dayRows.length?dayRows.map(([d,v])=><div key={d} className="text-xs"><div className="flex justify-between gap-3"><span>{d.split('-').reverse().join('/')}</span><span>{money(v)}</span></div><div className="bg-[#292929] h-2 rounded-full mt-1 overflow-hidden"><div className="h-full bg-[#D95B1E]" style={{width:(v/maxDay*100)+'%'}}/></div></div>):<p className="text-zinc-500 text-xs">Sem vendas no período.</p>}</div></section><section className={panel}><h2 className="font-bold text-sm mb-4">Produtos mais vendidos</h2><div className="space-y-2 max-h-72 overflow-y-auto">{stats.prods.length?stats.prods.slice(0,12).map((p,i)=><div key={i} className="flex justify-between border-b border-[#303030] pb-2 text-xs gap-3"><span>{p.name}</span><span className="whitespace-nowrap text-[#ff975f]">{p.quantity.toLocaleString('pt-BR')} un. · {money(p.revenue)}</span></div>):<p className="text-zinc-500 text-xs">Sem produtos vendidos no período.</p>}</div></section></div>
+        <section className={panel}><h2 className="font-bold text-sm mb-4">Horários de registro das vendas</h2>{hourRows.length?<div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">{hourRows.map(([h,v])=><div key={h} className="text-xs"><div className="flex justify-between mb-1"><span>{h}h</span><span>{v}</span></div><div className="bg-[#292929] h-2 rounded-full overflow-hidden"><div className="h-full bg-[#D95B1E]" style={{width:(v/maxHour*100)+'%'}}/></div></div>)}</div>:<p className="text-xs text-zinc-500">Os lançamentos disponíveis não possuem horário de criação para esse indicador.</p>}</section>
+        <p className="text-[11px] text-zinc-500">Fonte: lançamentos registrados no FoodStrick para esta empresa, incluindo registros arquivados e excluindo cancelados. Ticket médio calculado por lançamento de venda, não por pedido único. O resultado desconta custos registrados e despesas, sem substituir o fechamento contábil. Horários dependem de created_at.</p>
+      </div>;
+    }
+
     // ESTOQUE INTELIGENTE - Etapa 2. Isolado das rotinas de vendas e fichas.
     function FoodStrickStock({companyId, client}) {
       const [items,setItems] = React.useState([]);
@@ -2458,7 +2530,9 @@
                       <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/><path d="M8 18h.01"/><path d="M12 18h.01"/><path d="M16 18h.01"/></svg>
                       Fechamento Mensal
                     </button>
-                    <button onClick={() => navegarPara('cozinha')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition-all ${abaAtiva === 'cozinha' ? 'btn-orange shadow-md' : 'text-zinc-300 bg-[#1a1a1a]'}`}><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 13a4 4 0 0 1 0-8 6 6 0 0 1 12 0 4 4 0 0 1 0 8"/><path d="M6 13v6h12v-6"/></svg>Painel de Cozinha</button>
+                    <button onClick={() => navegarPara('relatorios')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition-all ${abaAtiva === 'relatorios' ? 'btn-orange shadow-md' : 'text-zinc-300 bg-[#1a1a1a]'}`}><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 6-7"/></svg>Relatórios Avançados</button>
+                    <button onClick={() => navegarPara('relatorios')} className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-xs font-semibold transition-all ${abaAtiva === 'relatorios' ? 'btn-orange shadow-md' : 'text-zinc-400 hover:bg-[#202020] hover:text-white'}`}><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 6-7"/></svg>Relatórios Avançados</button>
+                  <button onClick={() => navegarPara('cozinha')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition-all ${abaAtiva === 'cozinha' ? 'btn-orange shadow-md' : 'text-zinc-300 bg-[#1a1a1a]'}`}><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 13a4 4 0 0 1 0-8 6 6 0 0 1 12 0 4 4 0 0 1 0 8"/><path d="M6 13v6h12v-6"/></svg>Painel de Cozinha</button>
                     <button onClick={() => navegarPara('pedidos')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition-all ${abaAtiva === 'pedidos' ? 'btn-orange shadow-md' : 'text-zinc-300 bg-[#1a1a1a]'}`}>
                       <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 2h12v20l-2-1-2 1-2-1-2 1-2-1-2 1V2Z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg>
                       Pedidos Online {pedidosOnline.filter(p => p.status === 'pending').length > 0 && <span className="ml-auto rounded-full bg-red-600 px-2 py-0.5 text-[10px] text-white">{pedidosOnline.filter(p => p.status === 'pending').length}</span>}
@@ -2800,6 +2874,8 @@
 
             {/* CENTRAL DE AJUDA — independente do banco e das operações existentes */}
             {abaAtiva === 'ajuda' && <CentralAjuda onOpenTab={navegarPara} />}
+
+            {abaAtiva === 'relatorios' && (!isSuperAdmin || impersonatedCompany) && <FoodStrickAnalytics companyId={effectiveCompanyId} client={supabaseClient} products={produtos} />}
 
             {/* 1. ABA PAINEL GERAL */}
             {abaAtiva === 'painel' && (!isSuperAdmin || impersonatedCompany) && (
