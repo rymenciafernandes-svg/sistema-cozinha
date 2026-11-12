@@ -675,7 +675,7 @@
         const qty=number(recipeQty);
         const product=products.find(p=>p.id===recipeProduct);
         const stock=items.find(i=>i.id===recipeStockItem && i.item_type==='ingredient' && i.active);
-        if(!product || !stock || !/^\\d+(?:[.,]\\d{1,3})?$/.test(recipeQty.trim()) || !Number.isFinite(qty) || qty<=0){
+        if(!product || !stock || !/^\d+(?:[.,]\d{1,3})?$/.test(recipeQty.trim()) || !Number.isFinite(qty) || qty<=0){
           setError('Selecione produto, ingrediente ativo e quantidade válida (até 3 casas decimais).');return;
         }
         setRecipeBusy(true);setError('');setNotice('');
