@@ -593,6 +593,12 @@
     function FoodStrickStock({companyId, client}) {
       const [items,setItems] = React.useState([]);
       const [history,setHistory] = React.useState([]);
+      const [recipes,setRecipes] = React.useState([]);
+      const [products,setProducts] = React.useState([]);
+      const [recipeProduct,setRecipeProduct] = React.useState('');
+      const [recipeStockItem,setRecipeStockItem] = React.useState('');
+      const [recipeQty,setRecipeQty] = React.useState('');
+      const [recipeBusy,setRecipeBusy] = React.useState(false);
       const [loading,setLoading] = React.useState(false);
       const [busy,setBusy] = React.useState(false);
       const [error,setError] = React.useState('');
@@ -615,17 +621,22 @@
         if (!companyId || companyId === 'foodstrick-master') return;
         setLoading(true); setError('');
         try {
-          const [a,b] = await Promise.all([
+          const [a,b,c,d] = await Promise.all([
             client.from('fs_stock_balances').select('*').eq('company_id',companyId).order('name'),
-            client.from('fs_stock_movements').select('id,stock_item_id,movement_type,quantity,reason,created_at').eq('company_id',companyId).order('created_at',{ascending:false}).limit(100)
+            client.from('fs_stock_movements').select('id,stock_item_id,movement_type,quantity,reason,created_at').eq('company_id',companyId).order('created_at',{ascending:false}).limit(100),
+            client.from('produtos').select('id,nome').eq('company_id',companyId).order('nome'),
+            client.from('fs_stock_recipe_components').select('id,product_id,stock_item_id,quantity').eq('company_id',companyId)
           ]);
           if(a.error) throw a.error;
           if(b.error) throw b.error;
+          if(c.error) throw c.error;
+          if(d.error) throw d.error;
           setItems(a.data||[]);setHistory(b.data||[]);
+          setProducts(c.data||[]);setRecipes(d.data||[]);
         } catch(e) {setError(e.message || 'Não foi possível carregar o estoque. Confira a autenticação e as permissões RLS.');}
         finally {setLoading(false);}
       },[companyId,client]);
-      React.useEffect(()=>{setItems([]);setHistory([]);setSelected('');setNotice('');load();},[load]);
+      React.useEffect(()=>{setItems([]);setHistory([]);setRecipes([]);setProducts([]);setRecipeProduct('');setSelected('');setNotice('');load();},[load]);
       async function createItem(e){
         e.preventDefault();
         const min=number(minimum);
@@ -656,6 +667,33 @@
         if(err){setError(err.message);return;}
         setSavingId(null);setNotice('Estoque mínimo atualizado.');await load();
       }
+      async function saveRecipe(e){
+        e.preventDefault();
+        const qty=number(recipeQty);
+        const product=products.find(p=>p.id===recipeProduct);
+        const stock=items.find(i=>i.id===recipeStockItem && i.item_type==='ingredient' && i.active);
+        if(!product || !stock || !/^\\d+(?:[.,]\\d{1,3})?$/.test(recipeQty.trim()) || !Number.isFinite(qty) || qty<=0){
+          setError('Selecione produto, ingrediente ativo e quantidade válida (até 3 casas decimais).');return;
+        }
+        setRecipeBusy(true);setError('');setNotice('');
+        const existing=recipes.find(r=>r.product_id===recipeProduct && r.stock_item_id===recipeStockItem);
+        const payload={company_id:companyId,product_id:recipeProduct,stock_item_id:recipeStockItem,quantity:qty};
+        const result=existing
+          ? await client.from('fs_stock_recipe_components').update({quantity:qty,updated_at:new Date().toISOString()}).eq('id',existing.id).eq('company_id',companyId)
+          : await client.from('fs_stock_recipe_components').insert(payload);
+        setRecipeBusy(false);
+        if(result.error){setError(result.error.message);return;}
+        setRecipeQty('');setNotice(existing?'Quantidade atualizada.':'Ingrediente vinculado à receita.');await load();
+      }
+      async function removeRecipe(id){
+        if(!window.confirm('Remover este vínculo da receita? O estoque não será movimentado.'))return;
+        setRecipeBusy(true);setError('');setNotice('');
+        const {error:err}=await client.from('fs_stock_recipe_components').delete().eq('id',id).eq('company_id',companyId);
+        setRecipeBusy(false);
+        if(err){setError(err.message);return;}
+        setNotice('Vínculo removido.');await load();
+      }
+      const recipeRows=recipes.filter(r=>r.product_id===recipeProduct);
       const low=items.filter(i=>i.active && Number(i.current_quantity)<=Number(i.minimum_quantity));
       const btn='px-4 py-2.5 rounded-lg text-xs font-semibold bg-[#D95B1E] text-white disabled:opacity-50';
       const input='w-full bg-[#202020] border border-[#393939] rounded-lg px-3 py-2.5 text-sm text-white outline-none focus:border-[#D95B1E]';
@@ -665,10 +703,17 @@
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">{[["Itens",items.filter(i=>i.active).length],["Ingredientes",items.filter(i=>i.item_type==='ingredient'&&i.active).length],["Produtos prontos",items.filter(i=>i.item_type==='finished_product'&&i.active).length],["Estoque baixo",low.length]].map(([label,val])=><div key={label} className={panel}><p className="text-xs text-zinc-400">{label}</p><p className="text-2xl font-bold text-white mt-2">{val}</p></div>)}</div>
         {error&&<p role="alert" className="rounded-lg border border-red-900 bg-red-950/40 p-3 text-xs text-red-300">{error}</p>}
         {notice&&<p role="status" className="rounded-lg border border-emerald-900 bg-emerald-950/30 p-3 text-xs text-emerald-300">{notice}</p>}
-        <div className="flex flex-wrap gap-2">{[['items','Itens e saldos'],['new','Cadastrar item'],['movement','Movimentar'],['history','Histórico']].map(([id,label])=><button type="button" key={id} onClick={()=>{setTab(id);setError('');setNotice('');}} className={`px-4 py-2.5 rounded-lg text-xs font-semibold ${tab===id?'bg-[#D95B1E] text-white':'bg-[#242426] text-zinc-300'}`}>{label}</button>)}</div>
+        <div className="flex flex-wrap gap-2">{[['items','Itens e saldos'],['new','Cadastrar item'],['movement','Movimentar'],['history','Histórico'],['recipes','Vincular receitas']].map(([id,label])=><button type="button" key={id} onClick={()=>{setTab(id);setError('');setNotice('');}} className={`px-4 py-2.5 rounded-lg text-xs font-semibold ${tab===id?'bg-[#D95B1E] text-white':'bg-[#242426] text-zinc-300'}`}>{label}</button>)}</div>
         {tab==='items'&&<div className={panel}><h2 className="text-sm font-bold mb-3">Itens cadastrados</h2>{!items.length?<p className="text-xs text-zinc-400">Nenhum item cadastrado ainda. Use “Cadastrar item” para começar.</p>:<div className="space-y-2">{items.map(i=><div key={i.id} className="flex flex-wrap items-center justify-between gap-3 border-b border-[#303034] py-3"><div><p className="text-sm font-semibold text-white">{i.name}</p><p className="text-xs text-zinc-400">{i.item_type==='ingredient'?'Ingrediente':'Produto pronto'} • Mínimo: {fmt(i.minimum_quantity)} {units[i.unit]}</p></div><div className="flex items-center gap-3"><span className={`text-sm font-bold ${Number(i.current_quantity)<=Number(i.minimum_quantity)?'text-amber-400':'text-emerald-400'}`}>{fmt(i.current_quantity)} {units[i.unit]}</span><button type="button" onClick={()=>{setSavingId(i.id);setEditMinimum(String(i.minimum_quantity));}} className="text-xs text-[#f28a54]">Editar mínimo</button></div></div>)}</div>}</div>}
         {tab==='new'&&<form onSubmit={createItem} className={`${panel} space-y-3`}><h2 className="text-sm font-bold">Novo item de estoque</h2><label className="block text-xs text-zinc-400">Nome<input className={`${input} mt-1`} maxLength={160} required value={name} onChange={e=>setName(e.target.value)} placeholder="Ex.: Carne bovina, Coca-Cola lata"/></label><div className="grid grid-cols-1 sm:grid-cols-3 gap-3"><label className="text-xs text-zinc-400">Tipo<select className={`${input} mt-1`} value={type} onChange={e=>setType(e.target.value)}><option value="ingredient">Ingrediente</option><option value="finished_product">Produto pronto</option></select></label><label className="text-xs text-zinc-400">Unidade<select className={`${input} mt-1`} value={unit} onChange={e=>setUnit(e.target.value)}>{Object.keys(units).map(u=><option key={u} value={u}>{u}</option>)}</select></label><label className="text-xs text-zinc-400">Estoque mínimo<input className={`${input} mt-1`} inputMode="decimal" value={minimum} onChange={e=>setMinimum(e.target.value)} required/></label></div><button className={btn} disabled={busy||!companyId}>{busy?'Salvando...':'Cadastrar item'}</button></form>}
         {tab==='movement'&&<form onSubmit={createMovement} className={`${panel} space-y-3`}><h2 className="text-sm font-bold">Registrar movimentação</h2><label className="block text-xs text-zinc-400">Item<select required className={`${input} mt-1`} value={selected} onChange={e=>setSelected(e.target.value)}><option value="">Selecione</option>{items.filter(i=>i.active).map(i=><option key={i.id} value={i.id}>{i.name} — {fmt(i.current_quantity)} {i.unit}</option>)}</select></label><div className="grid grid-cols-1 sm:grid-cols-2 gap-3"><label className="text-xs text-zinc-400">Tipo<select className={`${input} mt-1`} value={movement} onChange={e=>setMovement(e.target.value)}><option value="entry">Entrada / reposição</option><option value="exit">Saída manual</option><option value="adjustment_plus">Ajuste positivo</option><option value="adjustment_minus">Ajuste negativo</option></select></label><label className="text-xs text-zinc-400">Quantidade<input className={`${input} mt-1`} required inputMode="decimal" value={quantity} onChange={e=>setQuantity(e.target.value)} placeholder="Ex.: 1 ou 150,5"/></label></div><label className="block text-xs text-zinc-400">Motivo (opcional)<input className={`${input} mt-1`} maxLength={500} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Ex.: Compra de fornecedor"/></label><p className="text-xs text-amber-300">Nesta etapa as saídas são manuais. Ainda não há baixa automática por venda.</p><button className={btn} disabled={busy||!selected}>{busy?'Salvando...':'Registrar movimentação'}</button></form>}
+        {tab==='recipes'&&<div className={`${panel} space-y-4`}>
+          <div><h2 className="text-sm font-bold">Vincular ingredientes às receitas</h2><p className="text-xs text-zinc-400 mt-1">Associe ingredientes do estoque aos produtos cadastrados. Esta etapa não desconta estoque automaticamente.</p></div>
+          <label className="block text-xs text-zinc-400">Produto da ficha técnica<select className={`${input} mt-1`} value={recipeProduct} onChange={e=>{setRecipeProduct(e.target.value);setRecipeStockItem('');setRecipeQty('');}}><option value="">Selecione um produto</option>{products.map(p=><option key={p.id} value={p.id}>{p.nome}</option>)}</select></label>
+          {recipeProduct&&<><div className="space-y-2"><p className="text-xs font-bold">Ingredientes vinculados</p>{!recipeRows.length?<p className="text-xs text-zinc-400">Nenhum ingrediente vinculado a este produto.</p>:recipeRows.map(r=>{const item=items.find(i=>i.id===r.stock_item_id);return <div key={r.id} className="flex flex-wrap justify-between items-center gap-2 border-b border-[#303034] py-2"><div className="text-xs">{item?.name||'Ingrediente indisponível'} <span className="text-zinc-400">• {fmt(r.quantity)} {item?.unit||''} por unidade vendida</span></div><button type="button" disabled={recipeBusy} onClick={()=>removeRecipe(r.id)} className="text-xs text-red-400 disabled:opacity-50">Remover</button></div>})}</div>
+          <form onSubmit={saveRecipe} className="space-y-3 border-t border-[#303034] pt-4"><h3 className="text-xs font-bold">Adicionar ou atualizar ingrediente</h3><div className="grid grid-cols-1 sm:grid-cols-2 gap-3"><label className="block text-xs text-zinc-400">Ingrediente<select required className={`${input} mt-1`} value={recipeStockItem} onChange={e=>{const id=e.target.value;setRecipeStockItem(id);const old=recipes.find(r=>r.product_id===recipeProduct&&r.stock_item_id===id);setRecipeQty(old?String(old.quantity):'');}}><option value="">Selecione</option>{items.filter(i=>i.item_type==='ingredient'&&i.active).map(i=><option key={i.id} value={i.id}>{i.name} ({i.unit})</option>)}</select></label><label className="block text-xs text-zinc-400">Quantidade por produto<input required className={`${input} mt-1`} inputMode="decimal" placeholder="Ex.: 100" value={recipeQty} onChange={e=>setRecipeQty(e.target.value)}/></label></div><p className="text-xs text-amber-300">A quantidade usa a unidade do ingrediente cadastrado (g, kg, ml, l ou un). Confira a equivalência antes de salvar.</p><button className={btn} disabled={recipeBusy||!recipeStockItem}>{recipeBusy?'Salvando...':'Salvar vínculo'}</button></form></>}
+          {!products.length&&<p className="text-xs text-amber-300">Nenhum produto encontrado nesta empresa.</p>}
+        </div>}
         {tab==='history'&&<div className={panel}><h2 className="text-sm font-bold mb-3">Últimas 100 movimentações</h2>{!history.length?<p className="text-xs text-zinc-400">Nenhuma movimentação registrada.</p>:<div className="space-y-2">{history.map(m=><div key={m.id} className="border-b border-[#303034] py-2 flex justify-between gap-3"><div><p className="text-xs font-semibold">{items.find(i=>i.id===m.stock_item_id)?.name||'Item'}</p><p className="text-[11px] text-zinc-400">{new Date(m.created_at).toLocaleString('pt-BR')} • {m.reason||'Sem observação'}</p></div><p className={`text-xs font-bold ${['entry','adjustment_plus'].includes(m.movement_type)?'text-emerald-400':'text-amber-400'}`}>{['entry','adjustment_plus'].includes(m.movement_type)?'+':'−'}{fmt(m.quantity)}</p></div>)}</div>}</div>}
         {savingId&&<div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"><form onSubmit={updateMinimum} className="w-full max-w-sm rounded-xl bg-[#1d1d20] border border-[#383838] p-5 space-y-4"><h3 className="font-bold">Editar estoque mínimo</h3><input className={input} value={editMinimum} inputMode="decimal" onChange={e=>setEditMinimum(e.target.value)}/><div className="flex justify-end gap-2"><button type="button" onClick={()=>setSavingId(null)} className="px-4 py-2 text-xs text-zinc-300">Cancelar</button><button className={btn} disabled={busy}>Salvar</button></div></form></div>}
       </div>;
