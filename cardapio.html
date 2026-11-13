@@ -470,6 +470,51 @@ body:has(.menu-topbar) { background: var(--menu-paper); }
   }
 }
 
+/* Tema escuro do cardápio público */
+:root {
+  --menu-paper: #101513;
+  --menu-surface: #19201c;
+  --menu-ink: #f5f1e8;
+  --menu-muted: #b9c3ba;
+  --menu-edge: #343e37;
+  --menu-wash: #242e27;
+  --menu-highlight: #e1eddb;
+}
+
+.hero { border: 1px solid #355447; }
+.hero.has-cover::before { background-color: #0b110e; }
+
+.menu-category-link { color: var(--menu-muted); }
+.menu-category-link:hover,
+.menu-category-link:focus {
+  color: var(--menu-ink);
+  border-color: #66796b;
+  background: var(--menu-wash);
+}
+.menu-category-link:active { background: #354639; }
+.menu-category-link:focus-visible,
+.food-card .qty-btn:focus-visible { outline-color: var(--menu-highlight); }
+
+.menu-combo-tag {
+  color: var(--menu-highlight);
+  border-color: #53695a;
+}
+.menu-section > .text-zinc-500 { color: var(--menu-muted); }
+.food-card:hover, .food-card:focus-within { border-color: #65796a; }
+.food-card .price { color: var(--menu-highlight); }
+.food-card .qty-btn {
+  color: var(--menu-highlight);
+  border-color: #536458;
+  background: var(--menu-wash);
+}
+.food-card .qty-btn:hover { background: #324238; }
+.food-card .qty-btn.accent,
+.cart-fab { border: 1px solid #65836f; }
+
+@media (max-width: 760px) {
+  .hero.has-cover::before { aspect-ratio: 2.9; }
+}
+
 </style>
 </head>
 <body>
