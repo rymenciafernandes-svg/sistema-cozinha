@@ -194,6 +194,7 @@ html{scroll-behavior:smooth}body{margin:0;line-height:1.5}button,input,select,te
       const selectedCombos = combos.filter(c=>Number(comboCart[c.id]||0)>0);
       const total = addonLines.reduce((n,l)=>n+addonLineTotal(l),0) + selected.reduce((sum,p)=>sum+Number(cart[p.id])*Number(p.price??p.preco_venda??0),0) + selectedCombos.reduce((sum,c)=>sum+Number(comboCart[c.id])*Number(c.price||0),0);
       const count = addonLines.length + selected.reduce((sum,p)=>sum+Number(cart[p.id]),0) + selectedCombos.reduce((sum,c)=>sum+Number(comboCart[c.id]),0);
+      const previewDiscount = couponPreview && Math.abs(Number(couponPreview.subtotal)-total)<0.005 ? Math.min(total,Math.max(0,Number(couponPreview.discount)||0)) : 0;
       const categories = [...new Set(visibleProducts.map(p => p.category || p.menu_category || 'Outros'))];
       const imageOf = p => p.image_url || p.menu_image_url || '';
       const safePhoto = value => typeof value === 'string' && /^https:\/\/[^"'<>\s]+$/i.test(value) ? value : '';
